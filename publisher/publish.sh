@@ -81,17 +81,27 @@ fi
 # --- Step 3: Print import URL ---
 echo ""
 echo "=== Step 3: Import into Medium ==="
-# The HTML file on GitHub raw
+
+# GitHub Pages URL (served with correct Content-Type: text/html)
+OWNER="$(echo "$REPO" | cut -d/ -f1)"
+REPO_NAME="$(echo "$REPO" | cut -d/ -f2)"
+PAGES_URL="https://${OWNER}.github.io/${REPO_NAME}/${BASENAME}.html"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/articles/${BASENAME}.html"
 IMPORT_URL="https://medium.com/p/import"
 
 echo ""
-echo "  Your article HTML is hosted at:"
+echo "  GitHub Pages URL (use this for Medium import):"
+echo "    $PAGES_URL"
+echo ""
+echo "  Fallback (raw, may not work with Medium):"
 echo "    $RAW_URL"
 echo ""
 echo "  To import into Medium:"
-echo "    1. Open: $IMPORT_URL"
-echo "    2. Paste this URL: $RAW_URL"
-echo "    3. Review the draft and publish"
+echo "    1. Wait ~1 min for GitHub Pages deployment to finish"
+echo "    2. Open: $IMPORT_URL"
+echo "    3. Paste: $PAGES_URL"
+echo "    4. Review the draft and publish"
+echo ""
+echo "  NOTE: GitHub Pages must be enabled in repo Settings > Pages > Source: GitHub Actions"
 echo ""
 echo "Done."
