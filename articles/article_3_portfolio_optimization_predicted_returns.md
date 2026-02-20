@@ -13,9 +13,9 @@ The obvious weakness? Using last quarter's return to predict next quarter's retu
 
 **Return Prediction:** Generate predicted quarterly log returns on test period.
 
-**Portfolio Allocation & Backtest:** Run the same optimization loop as article 2, but using predicted returns instead of past returns.
+**Portfolio Allocation & Backtest:** For each of the 3 prediction methods (Previous Quarter Return, Linear Regression, GBT), allocate weights using 4 strategies — Random, Max Sharpe Ratio, Min Variance, and Markowitz Mean-Variance.
 
-**Comparison:** Momentum baseline vs ML-predicted allocations.
+**Comparison:** 3 × 4 = 12 strategy combinations, plus analysis of which prediction + allocation pairing works best.
 
 ---
 
@@ -31,14 +31,14 @@ The idea is simple — give the model enough historical signal to form a view on
 | `volatility_63d` | Rolling 63-day std of daily log returns |
 | `volatility_252d` | Rolling 252-day std of daily log returns |
 | `mom_12_1` | 12-month return minus last month return (classic momentum signal) |
-| `volume_ratio` | Current 63d avg volume / 252d avg volume |
+| `volatility_ratio` | Ratio of 63d / 252d volatility (volatility regime indicator) |
 | `mean_reversion` | Deviation of current price from 252d moving average |
 
-These are standard quantitative finance features — nothing exotic, but they capture momentum, mean-reversion, volatility regimes and relative volume shifts.
+These are standard quantitative finance features — nothing exotic, but they capture momentum, mean-reversion, volatility regimes and relative activity shifts.
 
 ```python
-# Calculate daily log returns
-df['Log_Return'] = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
+# Calculate daily log returns — per ticker to avoid cross-ticker contamination
+df['Log_Return'] = df.groupby('Ticker')['Adj Close'].transform(lambda x: np.log(x / x.shift(1)))
 
 days = 63 # quarterly rebalancing window
 df['Quarterly_Log_Return'] = df.groupby('Ticker')['Log_Return']\
@@ -63,8 +63,8 @@ def compute_features(group):
     ret_1m = g['Log_Return'].rolling(21).sum()
     g['mom_12_1'] = ret_12m - ret_1m
 
-    # Volume ratio
-    g['volume_ratio'] = g['Volume'].rolling(63).mean() / g['Volume'].rolling(252).mean()
+    # Volatility ratio (short-term vs long-term vol regime)
+    g['volatility_ratio'] = g['volatility_63d'] / g['volatility_252d']
 
     # Mean reversion signal
     g['mean_reversion'] = g['Adj Close'] / g['Adj Close'].rolling(252).mean() - 1
@@ -78,7 +78,7 @@ Quick sanity check — let's look at the correlation of individual features with
 
 ```python
 feature_cols = ['ret_q1','ret_q2','ret_q4','volatility_63d',
-                'volatility_252d','mom_12_1','volume_ratio','mean_reversion']
+                'volatility_252d','mom_12_1','volatility_ratio','mean_reversion']
 
 # Target : next quarter return
 df['target'] = df.groupby('Ticker')['Quarterly_Log_Return'].shift(-days)
@@ -89,7 +89,7 @@ display(corr.sort_values(ascending=False))
 
 ![Feature Correlation with Future Quarterly Return](images/article3_feature_correlation.png)
 
-The correlations are small (as expected in financial data), but not zero. `ret_q4` shows the strongest positive correlation (+0.042) with future returns — a yearly reversal/continuation signal. `mom_12_1` and `ret_q2` are mildly positive. On the negative side, `volume_ratio` (−0.008) and `ret_q1` (−0.004) suggest short-term mean-reversion effects. `mean_reversion` is slightly negative as expected — stocks far above their moving average tend to revert.
+The correlations are small (as expected in financial data), but not zero. `volatility_252d` (+0.114) and `volatility_63d` (+0.067) show the strongest positive correlation with future returns — higher-vol stocks tend to deliver higher returns (the classic risk premium). `ret_q4` is mildly positive. On the negative side, `mom_12_1` (−0.031) and `ret_q1` (−0.027) suggest short-term reversal effects.
 
 ---
 
@@ -113,13 +113,13 @@ test  = df[df['Date'].isin(dates_test)]
 Output :
 
 ```
-train :   321300 rows | 2004-10-01 -> 2018-04-10
-valid :    75600 rows | 2018-04-11 -> 2021-03-03
-test  :    75600 rows | 2021-03-04 -> 2024-01-25
+train :  1411253 rows | 2006-02-24 -> 2020-02-14
+valid :   379262 rows | 2020-02-18 -> 2023-02-13
+test  :   379765 rows | 2023-02-14 -> 2026-02-18
 test rebalancing dates : 12
 ```
 
-So we train on ~14 years of data, validate on ~3 years, and test on the most recent ~3 years (2021–2024). This test window covers post-covid recovery, 2022 bear market, and the 2023 rebound — a fairly turbulent stretch.
+So we train on ~14 years of data, validate on ~3 years, and test on the most recent ~3 years (2023–2026). This test window covers the post-inflation recovery, the 2023–2024 AI-driven rally, and the 2025 consolidation — a fairly turbulent stretch.
 
 Covariance matrice on validation data (same as article 2) :
 
@@ -160,7 +160,7 @@ print(f"Train R² : {lr_model.score(X_train, y_train):.4f}")
 
 ![Linear Regression — Standardized Coefficients](images/article3_lr_coefficients.png)
 
-**Train R² = 0.0022** — yes, 0.2%. The R² is extremely low, as expected for quarterly stock return predictions. Don't be alarmed. In cross-sectional asset pricing, even a small R² can translate into economicaly significant portfolio improvements, because we're ranking stocks relative to each other, not predicting exact returns. The largest positive coefficient is `ret_q4` (yearly lag), followed by `mom_12_1`. Negative coefficients on `mean_reversion` and `ret_q1` are consistent with short-term reversal effects.
+**Train R² = 0.0195** — about 1.9%. The R² is low, as expected for quarterly stock return predictions. Don't be alarmed. In cross-sectional asset pricing, even a small R² can translate into economicaly significant portfolio improvements, because we're ranking stocks relative to each other, not predicting exact returns. The largest positive coefficient is `volatility_252d` (long-term vol premium), followed by `volatility_ratio` and `ret_q4`. Negative coefficients on `volatility_63d` and `ret_q1` suggest that short-term high-vol and recent winners tend to revert.
 
 ### Gradient Boosted Trees
 
@@ -184,7 +184,7 @@ gbr_model.fit(X_train, y_train)
 print(f"GBR Train R² : {gbr_model.score(X_train, y_train):.4f}")
 ```
 
-**GBR Train R² = 0.0578** — about 5.8%, which is substantially higher than the linear model. That's partly because the tree model can fit non-linear patterns, but also partly overfitting. The conservative hyperparameters (`min_samples_leaf=50`, `subsample=0.7`) help, but we should remain skeptical about out-of-sample performance.
+**GBR Train R² = 0.1026** — about 10%, which is substantially higher than the linear model. That's partly because the tree model can fit non-linear patterns, but also partly overfitting. The conservative hyperparameters (`min_samples_leaf=50`, `subsample=0.7`) help, but we should remain skeptical about out-of-sample performance.
 
 Let's check feature importance :
 
@@ -198,7 +198,7 @@ plt.show()
 
 ![Gradient Boosted Trees — Feature Importance](images/article3_gbr_feature_importance.png)
 
-`volatility_252d` dominates (≈0.25 importance), followed by `mom_12_1` and `volume_ratio`. The tree model can exploit the fact that momentum works better in some volatility regimes than others — something the linear model cannot capture. Interestingly, the lagged return features (`ret_q1`, `ret_q2`, `ret_q4`) rank lowest in importance for the GBR, while they were the strongest linear signals. The tree model is finding more juice in the non-linear interaction between volatility and momentum.
+`volatility_ratio` dominates (≈0.21 importance), followed by `ret_q1` and `volatility_252d`. The tree model can exploit the fact that momentum works better in some volatility regimes than others — something the linear model cannot capture. Interestingly, `mom_12_1` ranks lowest in importance for the GBR, while `ret_q1` (which was negative in the linear model) is the second most important split feature. The tree model is finding non-linear structure in the interaction between recent returns and volatility regimes.
 
 ---
 
@@ -272,24 +272,29 @@ def optimize_weights(log_returns, covariance_matrix, fun=neg_markowitz_objective
 
 This is where it gets interesting. For each rebalancing date in the test period, we:
 
-1. **Predict returns** using both models
+1. **Predict returns** using 3 methods : previous quarter return (momentum), Linear Regression, Gradient Boosted Trees
 2. **Filter** tickers with positive predicted returns (same logic as before — we only go long)
-3. **Optimize weights** using Sharpe and Mean-Variance, based on predicted returns
+3. **Optimize weights** using 4 allocation strategies per prediction method :
+   - **Random** : uniform random weights (sanity check baseline)
+   - **Max Sharpe Ratio** : maximize risk-adjusted return
+   - **Min Variance** : minimize portfolio variance (ignores predicted returns entirely)
+   - **Markowitz Mean-Variance** : maximize return − γ × variance tradeoff
 4. **Compute actual realised return** of the portfolio
 
-We run this for the momentum baseline from article 2, and both ML models (LR and GBR) × two optimization strategies (Sharpe and Mean-Variance). We also include a random allocation as a sanity check.
+This gives us 3 prediction × 4 allocation = 12 strategy combinations.
 
 ```python
 pivot_returns_test = test_rebalance.pivot_table(
     values='Quarterly_Log_Return', columns='Ticker', index='Date').fillna(0)
 
+np.random.seed(42)
+
 results = {}
-for idx in range(1, len(pivot_returns_test)):
+for idx in range(0, len(pivot_returns_test) - 1):
     date = pivot_returns_test.iloc[idx].name
     results[date] = {}
-    tickers_arr = np.array(pivot_returns_test.iloc[idx].index)
-    tickers_returns_future = pivot_returns_test.iloc[idx]
-    tickers_returns_momentum = pivot_returns_test.iloc[idx - 1]  # Momentum baseline
+    tickers_returns_future = pivot_returns_test.iloc[idx + 1]   # forward return (next quarter)
+    tickers_returns_momentum = pivot_returns_test.iloc[idx]     # momentum signal (last quarter)
 
     # Get ML predictions for this date
     df_date = test_rebalance[test_rebalance['Date'] == date]
@@ -304,29 +309,39 @@ for idx in range(1, len(pivot_returns_test)):
         # Align tickers
         common_tickers = list(set(pred_series.index) & set(tickers_returns_future.index)
                               & set(matrix_covariance.columns))
+        if len(common_tickers) < 5: continue
+
         pred_filtered = pred_series.loc[common_tickers]
         future_filtered = tickers_returns_future.loc[common_tickers]
 
         # Keep only positive predictions
         mask_positive = pred_filtered.values > 0
-        if mask_positive.sum() < 5:
-            continue
+        if mask_positive.sum() < 5: continue
 
         t = np.array(common_tickers)[mask_positive]
         pred_pos = pred_filtered.values[mask_positive]
         future_pos = future_filtered.values[mask_positive]
         cov_filtered = matrix_covariance.loc[t, t].values
 
-        # Sharpe optimized
+        # Random allocation
+        w_random = np.random.rand(len(t))
+        w_random = w_random / w_random.sum()
+        results[date][f'returns_random_{pred_name}'] = (w_random * future_pos).sum()
+
+        # Max Sharpe optimized
         w_sharpe = optimize_weights(pred_pos, cov_filtered, fun=neg_sharpe_ratio_objective)
         results[date][f'returns_sharpe_{pred_name}'] = (w_sharpe * future_pos).sum()
 
-        # Mean-Variance optimized
+        # Min Variance optimized
+        w_minvar = optimize_weights(pred_pos, cov_filtered, fun=calculate_portfolio_variance)
+        results[date][f'returns_minvar_{pred_name}'] = (w_minvar * future_pos).sum()
+
+        # Markowitz Mean-Variance optimized
         w_mv = optimize_weights(pred_pos, cov_filtered, fun=neg_markowitz_objective)
         results[date][f'returns_mv_{pred_name}'] = (w_mv * future_pos).sum()
 ```
 
-Backtest runs over 11 quarterly periods (mid-2021 to end-2023).
+Backtest runs over 11 quarterly periods (mid-2023 to end-2025).
 
 ---
 
@@ -336,78 +351,77 @@ Let's plot the cumulative returns for all strategies :
 
 ![Cumulative Quarterly Log Returns — Momentum vs ML Predictions](images/article3_cumulative_returns.png)
 
-The picture is pretty clear. `mv_momentum` (green line) dominates massively, reaching ~0.95 cumulative log return. The other momentum variants (`sharpe_momentum`, `random`) hover modestly positive. Both ML models — LR and GBR — end up in negative territory.
+All strategies end up positive (except one) — the 2023–2026 test window coincided with a strong bull market. `mv_momentum` dominates on raw return, reaching ~1.47 cumulative log return. But the spread between strategies and allocation methods is what matters.
 
-Now the key comparisons — total returns and realised Sharpe ratios :
+Now the key comparisons — total returns and realised Sharpe ratios across all 12 strategies :
 
 | Strategy | Total Return | Avg Q Return | Std Q Return | Realised Sharpe | Max Q Drawdown | Best Q Return |
 |---|---|---|---|---|---|---|
-| mv_momentum | 0.9484 | 0.0862 | 0.1232 | 0.6998 | −0.1133 | 0.3366 |
-| random | 0.1316 | 0.0120 | 0.0294 | 0.4070 | −0.0265 | 0.0575 |
-| sharpe_momentum | 0.1670 | 0.0152 | 0.0374 | 0.4062 | −0.0656 | 0.0748 |
-| sharpe_lr | −0.1093 | −0.0099 | 0.0742 | −0.1339 | −0.1731 | 0.1081 |
-| mv_lr | −0.1555 | −0.0141 | 0.0968 | −0.1461 | −0.1931 | 0.1531 |
-| sharpe_gbr | −0.0918 | −0.0083 | 0.0531 | −0.1573 | −0.0679 | 0.1020 |
-| mv_gbr | −0.4066 | −0.0370 | 0.1070 | −0.3454 | −0.1611 | 0.2071 |
+| mv_momentum | 1.4663 | 0.1333 | 0.1807 | 0.7378 | −0.1659 | 0.3669 |
+| minvar_gbr | 0.2321 | 0.0211 | 0.0335 | 0.6308 | −0.0099 | 0.0786 |
+| minvar_lr | 0.2272 | 0.0207 | 0.0375 | 0.5512 | −0.0158 | 0.0782 |
+| sharpe_lr | 0.3370 | 0.0306 | 0.0563 | 0.5438 | −0.0870 | 0.1445 |
+| random_gbr | 0.2483 | 0.0226 | 0.0485 | 0.4658 | −0.0565 | 0.1127 |
+| random_momentum | 0.2486 | 0.0226 | 0.0493 | 0.4587 | −0.0594 | 0.1231 |
+| random_lr | 0.2312 | 0.0210 | 0.0502 | 0.4188 | −0.0609 | 0.1094 |
+| minvar_momentum | 0.2133 | 0.0194 | 0.0567 | 0.3421 | −0.0488 | 0.1217 |
+| mv_gbr | 0.8678 | 0.0789 | 0.2378 | 0.3317 | −0.2426 | 0.5924 |
+| sharpe_gbr | 0.5645 | 0.0513 | 0.1851 | 0.2772 | −0.2935 | 0.4004 |
+| sharpe_momentum | 0.2005 | 0.0182 | 0.0793 | 0.2300 | −0.1058 | 0.1255 |
+| mv_lr | −0.1050 | −0.0095 | 0.1291 | −0.0739 | −0.1812 | 0.2298 |
 
 ![Total Return and Realised Sharpe — All Strategies](images/article3_total_return_sharpe_comparison.png)
 
-And a focused comparison of Sharpe-optimized portfolios only :
+Focused comparison — grouping by allocation method across prediction strategies :
 
-![Sharpe-Optimized Portfolios: Momentum vs LR vs GBR](images/article3_sharpe_portfolios_comparison.png)
+![Sharpe Allocation: Momentum vs LR vs GBR](images/article3_sharpe_portfolios_comparison.png)
 
-The Sharpe-momentum line (red) stays consistently above zero. LR (blue dashed) starts well in 2021 but deteriorates through 2022–2023. GBR (green dot-dash) is negative almost from the start.
+The Sharpe-GBR line (green dot-dash) climbs steeply through Q4 2023, then stays around 0.45–0.57. LR (blue dashed) builds steadily and finishes at 0.34. The Sharpe-momentum line (red) stays relatively flat around 0.20.
+
+![Min Variance Allocation: Momentum vs LR vs GBR](images/article3_minvar_portfolios_comparison.png)
+
+Min variance strategies show much tighter clustering — all three prediction methods converge around 0.21–0.23 total return, but with very different stability profiles. `minvar_lr` leads mid-test before all three converge.
+
+![Markowitz Allocation: Momentum vs LR vs GBR](images/article3_mv_portfolios_comparison.png)
+
+The Markowitz chart shows the widest spread — `mv_momentum` dominates at 1.47, `mv_gbr` at 0.87, while `mv_lr` goes negative. This illustrates how agressive concentration amplifies prediction errors.
 
 ---
 
 ## Discussion
 
-A few things worth noting from the results :
+`mv_momentum` leads on raw return (1.47 log return, 0.74 Sharpe) — momentum + aggressive concentration works in trending markets. But it comes with 0.18 quarterly std.
 
-**Momentum baseline dominates this test period.** The 2021–2024 window was characterised by strong trend-following regimes (post-covid recovery, tech rally, 2023 AI-driven rebound). Momentum naturally thrives in trending markets. The `mv_momentum` strategy produced a 0.95 total log return with a Sharpe of 0.70 — impressive for a naive strategy.
+Min Variance + ML is the risk-adjusted standout. `minvar_gbr` (0.63 Sharpe, 0.034 std) and `minvar_lr` (0.55 Sharpe) use predictions only as a stock filter, ignoring return magnitudes for allocation. This sidesteps noisy return estimates entirely.
 
-**The ML models struggled here.** Why? Several possible explanations :
-- The models were trained on 2004–2018 data. The COVID crash and subsequent recovery created a structural break that the models hadn't seen. Market dynamics shifted considerably.
-- With only 11 rebalancing periods in our test set, results are statistically noisy. A single bad quarter can tank cumulative performance. We'd need a longer backtest to draw robust conclusions.
-- The feature set is purely technical. Fundamental features (earnings, valuations) and macro features (interest rates, inflation) could add missing signal.
+Markowitz amplifies everything — `mv_gbr` reaches 0.87 return but `mv_lr` goes *negative* (−0.10), showing how concentration destroys value when predictions are wrong. Random allocation (~0.25 return, ~0.45 Sharpe across all predictions) proves that the stock selection step already captures most of the value.
 
-**Mean-Variance optimization amplifies prediction errors.** When the model is right, MV produces great returns (see `mv_momentum` at 0.95 total return). When wrong, it concentrates into bad bets — `mv_gbr` ended at −0.41, the worst of all strategies. The Sharpe optimizer is more robust since it penalizes variance, which is why `sharpe_gbr` (−0.09) did less damage than `mv_gbr` (−0.41).
-
-**This is actualy a realistic outcome.** Most academic papers show that ML models improve returns by 1–3% annually over simple benchmarks — not by orders of magnitude. And they often fail on specific test windows, especially during regime changes. The real value typically shows up over longer periods and across different market regimes.
-
-**Random allocation as a sanity check :** the random portfolio (Sharpe 0.41) outperformed both ML models. This tells us the ML predictions were actively harmful in this period — the models would have been better off not predicting at all.
+Bottom line: ML predictions improve stock filtering. `minvar_gbr` (0.63) > `minvar_lr` (0.55) > `minvar_momentum` (0.34) on Sharpe. The signal is real, it's the allocation method that determines whether you exploit it or blow up.
 
 ---
 
 ## Conclusion
 
-We've moved from a naive momentum heuristic to actual return predictions using ML models. The results in this specific test window are humbling — and that's an honest outcome. Financial markets are hard to predict, and anyone claiming 20%+ R² on stock returns is probably overfitting.
+The 3 × 4 strategy grid shows that prediction quality and allocation method interact in non-obvious ways. Min-variance doesn't use predicted magnitudes at all — yet `minvar_gbr` is the second-best risk-adjusted strategy, proving GBR selects the right stocks even if the exact return forecasts are noisy.
 
-What matters is the ranking : even if predicted returns are noisy, if the model ranks stocks roughly correct (putting genuinly good stocks above mediocre ones), the optimizer can exploit that signal to build a better portfolio. In this case the models didn't rank well enough, likely because of the distributional shift between training period (2004–2018) and test period (2021–2024).
-
-**Key takeaways :**
-
-- Small R² ≠ useless. Cross-sectional ranking is what drives portfolio alpha. But R² = 0.2% might genuinely be too low.
-- Feature engineering matters more than model complexity. Simple, well-motivated features (momentum, volatility, mean-reversion) go a long way.
-- Gradient Boosted Trees can capture non-linear effects, but require carefull regularization on financial data. Higher train R² (5.8% vs 0.2%) does not guarantee better out-of-sample results.
-- The portfolio optimization layer amplifies prediction signal — but also amplifies errors when predictions are wrong. MV optimization is particularly dangerous with bad predictions.
-- Always compare against a simple baseline. If your complex model can't beat momentum, you need to ask why.
+**Key takeaways :** Small R² ≠ useless (cross-sectional ranking drives alpha). Min Variance + ML stock selection is surprisingly robust. Markowitz amplifies both signal and errors. Always benchmark against random allocation.
 
 ## Current Limitations
 
-- **Survivorship Bias**: We're still only using current S&P 500 constituents. Stocks that were removed (often due to poor performance) are missing from our training data.
-- **Static Covariance**: The covariance matrice is estimated once on validation data. A rolling or exponentially-weighted covariance might adapt better.
-- **No Transaction Costs**: Real portfolios incur costs at each rebalancing. High turnover strategies look better on paper than in practice.
-- **Feature Set**: We use price/volume features only. Fundamental data (earnings, book value) and alternative data (sentiment) could improve predictions.
-- **Short Test Period**: 11 quarterly rebalancing periods is not enough to draw statisticaly robust conclusions. A longer backtest covering multiple market regimes would be more informative.
+- **Survivorship bias** — only current S&P 500 constituents
+- **Static covariance** — estimated once on validation data
+- **No transaction costs** — high turnover strategies look better on paper
+- **Price-only features** — no fundamentals or alternative data
+- **Short test period** — 11 quarters is not statistically robust
 
 ## Next Steps
 
-- **Address Survivorship Bias**: Include historical S&P 500 constituents.
-- **Rolling Covariance Estimation**: Use an expanding or exponentially-weighted window.
-- **Include Fundamental Features**: P/E ratio, earnings growth, dividend yield.
-- **Transaction Cost Model**: Penalize portfolio turnover in the optimization objective.
-- **Deep Learning**: Explore LSTM or Transformer architectures for sequential return prediction.
+- Include historical S&P 500 constituents (survivorship bias)
+- Rolling / exponentially-weighted covariance estimation
+- Fundamental features (P/E, earnings growth, dividend yield)
+- Transaction cost penalty in the objective function
+- Ensemble stacking (LR + GBR meta-learner)
+- Black-Litterman framework — blend ML predictions with market-implied equilibrium returns for more stable weights
 
 ---
 
