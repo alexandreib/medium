@@ -85,7 +85,7 @@ echo "=== Step 3: Import into Medium ==="
 # GitHub Pages URL (served with correct Content-Type: text/html)
 OWNER="$(echo "$REPO" | cut -d/ -f1)"
 REPO_NAME="$(echo "$REPO" | cut -d/ -f2)"
-PAGES_URL="https://${OWNER}.github.io/${REPO_NAME}/${BASENAME}.html"
+PAGES_URL="https://${OWNER}.github.io/${REPO_NAME}/articles/${BASENAME}.html"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/articles/${BASENAME}.html"
 IMPORT_URL="https://medium.com/p/import"
 

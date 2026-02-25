@@ -82,10 +82,12 @@ def convert(input_path: str, output_path: str, repo: str, branch: str) -> None:
     md_text = rewrite_image_urls(md_text, raw_base)
 
     # Convert MD -> HTML
+    # Note: CodeHiliteExtension is intentionally excluded — Medium's importer
+    # strips <div class="highlight"> and inline styles, dropping code blocks entirely.
+    # Plain <pre><code> blocks survive the import.
     extensions = [
         TableExtension(),
         FencedCodeExtension(),
-        CodeHiliteExtension(css_class="highlight", noclasses=True, guess_lang=False),
     ]
     html_body = markdown.markdown(md_text, extensions=extensions)
 

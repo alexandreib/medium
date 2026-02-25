@@ -94,21 +94,21 @@ Best iteration stops around 200 rounds. The RMSE on validation is comparable to 
 
 ## Direct Weight Prediction — The Idea
 
-The standard approach (articles 2 & 3): predict returns $\hat{r}_i$, then optimize weights $w_i$ given $\hat{r}_i$ and a covariance matrix $\Sigma$. Two separate stages that don't talk to each other.
+The standard approach (articles 2 & 3): predict returns r̂ᵢ, then optimize weights wᵢ given r̂ᵢ and a covariance matrix Σ. Two separate stages that don't talk to each other.
 
 The idea here: **skip the two-stage pipeline entirely**. If we can learn what good allocations look like from historical data, we don't need the optimizer at test time.
 
 ### Oracle Weight Targets
 
-For each rebalancing date $t$ in the training set, we have access to the realised future returns $r_i^{(t)}$ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:
+For each rebalancing date *t* in the training set, we have access to the realised future returns rᵢ⁽ᵗ⁾ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:
 
-$$w^{*(t)} = \arg\min_w \left[\gamma \cdot w^\top \Sigma w - w^\top r^{(t)}\right]$$
+> **w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]**
 
-subject to $\sum_i w_i = 1$ and $0 \le w_i \le 0.3$
+subject to Σwᵢ = 1 and 0 ≤ wᵢ ≤ 0.3
 
-These $w^{*(t)}_i$ become training targets. The model learns:
+These w*ᵢ⁽ᵗ⁾ become training targets. The model learns:
 
-$$f(\text{features}_i^{(t)}) \approx w_i^{*(t)}$$
+> **f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾**
 
 ### Why This Can Work
 
@@ -118,10 +118,10 @@ Think of it this way — the oracle weights encode everything the optimizer woul
 
 ### Inference
 
-At test time, the model predicts a raw weight $\hat{w}_i$ for each stock. We apply:
+At test time, the model predicts a raw weight ŵᵢ for each stock. We apply:
 
-1. Floor negative predictions: $\hat{w}_i = \max(\hat{w}_i, 0)$
-2. Normalize: $\hat{w}_i = \hat{w}_i / \sum_j \hat{w}_j$
+1. Floor negative predictions: ŵᵢ = max(ŵᵢ, 0)
+2. Normalize: ŵᵢ = ŵᵢ / Σⱼ ŵⱼ
 
 No optimizer needed. Just clip and normalize.
 
@@ -304,12 +304,12 @@ Another nuance: the direct weight model produces one fixed allocation per rebala
 
 The one strategy that crushes everything is `mv_momentum`. Mean-variance optimization with momentum predictions benefits from the trending nature of the test period:
 
-- **Momentum signals are clean when trends persist.** In a sustained bull run, last quarter's winners keep winning. The return spread is large, so the $\hat{\mu}$ fed to the optimizer is accurate and well-separated from noise.
+- **Momentum signals are clean when trends persist.** In a sustained bull run, last quarter's winners keep winning. The return spread is large, so the μ̂ fed to the optimizer is accurate and well-separated from noise.
 - **The optimizer amplifies correct signals.** Mean-variance concentrates on high-predicted-return stocks while diversifying risk. When predictions are directionally right, this amplification produces outsized returns.
 - **Volatility structure is stable in trends.** Covariance estimated from recent data reflects the regime well. Correlations don't spike randomly like in crashes, so risk estimates remain useful.
 - **The 30% cap prevents worst-case overconcentration** but still allows heavy bets on top picks — exactly what works when momentum is correct.
 
-However, mean-variance is fragile in non-trending markets. When expected returns $\mu \approx 0$ for most stocks, the optimizer chases noise: tiny estimation errors get amplified into large weight swings, turnover spikes, and the portfolio degrades to a noisy version of min-variance. The direct weight prediction approach should be more robust in those regimes because it learns a stable mapping from features to allocations rather than relying on a point estimate of $\mu$.
+However, mean-variance is fragile in non-trending markets. When expected returns μ ≈ 0 for most stocks, the optimizer chases noise: tiny estimation errors get amplified into large weight swings, turnover spikes, and the portfolio degrades to a noisy version of min-variance. The direct weight prediction approach should be more robust in those regimes because it learns a stable mapping from features to allocations rather than relying on a point estimate of μ.
 
 ---
 
