@@ -71,139 +71,136 @@
 </tbody>
 </table>
 <p>If you haven't read <a href="https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-with-ml-predictions">article 3</a>, check it for the feature definitions and train/valid/test split logic. Same temporal split: 70/15/15.</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>df <span style="color: #666">=</span> pd<span style="color: #666">.</span>read_csv(<span style="color: #BA2121">&#39;../data/sp500_20years.csv&#39;</span>)
+<pre><code class="language-python">df = pd.read_csv('../data/sp500_20years.csv')
 
-df[<span style="color: #BA2121">&#39;Log_Return&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Adj Close&#39;</span>]<span style="color: #666">.</span>transform(<span style="color: #008000; font-weight: bold">lambda</span> x: np<span style="color: #666">.</span>log(x <span style="color: #666">/</span> x<span style="color: #666">.</span>shift(<span style="color: #666">1</span>)))
+df['Log_Return'] = df.groupby('Ticker')['Adj Close'].transform(lambda x: np.log(x / x.shift(1)))
 
-days <span style="color: #666">=</span> <span style="color: #666">63</span>
-df[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]\
-    <span style="color: #666">.</span>rolling(window<span style="color: #666">=</span>days, min_periods<span style="color: #666">=</span>days)<span style="color: #666">.</span>sum()\
-    <span style="color: #666">.</span>reset_index(<span style="color: #666">0</span>, drop<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+days = 63
+df['Quarterly_Log_Return'] = df.groupby('Ticker')['Log_Return']\
+    .rolling(window=days, min_periods=days).sum()\
+    .reset_index(0, drop=True)
 
-feature_cols <span style="color: #666">=</span> [<span style="color: #BA2121">&#39;ret_q1&#39;</span>,<span style="color: #BA2121">&#39;ret_q2&#39;</span>,<span style="color: #BA2121">&#39;ret_q4&#39;</span>,<span style="color: #BA2121">&#39;volatility_63d&#39;</span>,
-                <span style="color: #BA2121">&#39;volatility_252d&#39;</span>,<span style="color: #BA2121">&#39;mom_12_1&#39;</span>,<span style="color: #BA2121">&#39;volatility_ratio&#39;</span>,<span style="color: #BA2121">&#39;mean_reversion&#39;</span>]
-df[<span style="color: #BA2121">&#39;target&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>]<span style="color: #666">.</span>shift(<span style="color: #666">-</span>days)
-</code></pre></div>
-
+feature_cols = ['ret_q1','ret_q2','ret_q4','volatility_63d',
+                'volatility_252d','mom_12_1','volatility_ratio','mean_reversion']
+df['target'] = df.groupby('Ticker')['Quarterly_Log_Return'].shift(-days)
+</code></pre>
 <p>Output:</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>Total rows: 2,518,880
+<pre><code>Total rows: 2,518,880
 train :  1411253 rows | 2006-02-24 -&gt; 2020-02-14
 valid :   379262 rows | 2020-02-18 -&gt; 2023-02-13
 test  :   379765 rows | 2023-02-14 -&gt; 2026-02-18
 test rebalancing dates : 12
-</code></pre></div>
-
+</code></pre>
 <p>We also prepare quarterly-sampled versions of train and valid (one observation per 63 trading days). This gives non-overlapping returns for the weight model:</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>Quarterly train : 22295 rows | 56 dates
+<pre><code>Quarterly train : 22295 rows | 56 dates
 Quarterly valid :  5848 rows | 14 dates
-</code></pre></div>
-
+</code></pre>
 <p>So ~22K rows for the weight model vs ~1.4M for the return model. Big tradeoff.</p>
 <hr />
 <h2>LightGBM Baseline — MSE Loss</h2>
 <p>First, a standard LightGBM regressor trained on the full daily dataset. This replaces <code>GradientBoostingRegressor</code> from article 3.</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>params_mse <span style="color: #666">=</span> {
-    <span style="color: #BA2121">&#39;objective&#39;</span>: <span style="color: #BA2121">&#39;regression&#39;</span>,
-    <span style="color: #BA2121">&#39;metric&#39;</span>: <span style="color: #BA2121">&#39;rmse&#39;</span>,
-    <span style="color: #BA2121">&#39;learning_rate&#39;</span>: <span style="color: #666">0.05</span>,
-    <span style="color: #BA2121">&#39;num_leaves&#39;</span>: <span style="color: #666">31</span>,
-    <span style="color: #BA2121">&#39;max_depth&#39;</span>: <span style="color: #666">4</span>,
-    <span style="color: #BA2121">&#39;subsample&#39;</span>: <span style="color: #666">0.7</span>,
-    <span style="color: #BA2121">&#39;colsample_bytree&#39;</span>: <span style="color: #666">0.8</span>,
-    <span style="color: #BA2121">&#39;min_child_samples&#39;</span>: <span style="color: #666">50</span>,
-    <span style="color: #BA2121">&#39;random_state&#39;</span>: <span style="color: #666">42</span>,
-    <span style="color: #BA2121">&#39;verbose&#39;</span>: <span style="color: #666">-1</span>,
+<pre><code class="language-python">params_mse = {
+    'objective': 'regression',
+    'metric': 'rmse',
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'max_depth': 4,
+    'subsample': 0.7,
+    'colsample_bytree': 0.8,
+    'min_child_samples': 50,
+    'random_state': 42,
+    'verbose': -1,
 }
 
-lgbm_mse <span style="color: #666">=</span> lgb<span style="color: #666">.</span>train(
+lgbm_mse = lgb.train(
     params_mse, dtrain_mse,
-    num_boost_round<span style="color: #666">=500</span>,
-    valid_sets<span style="color: #666">=</span>[dvalid_mse],
-    callbacks<span style="color: #666">=</span>[lgb<span style="color: #666">.</span>early_stopping(<span style="color: #666">50</span>), lgb<span style="color: #666">.</span>log_evaluation(<span style="color: #666">50</span>)]
+    num_boost_round=500,
+    valid_sets=[dvalid_mse],
+    callbacks=[lgb.early_stopping(50), lgb.log_evaluation(50)]
 )
-</code></pre></div>
-
+</code></pre>
 <p>Best iteration stops around 200 rounds. The RMSE on validation is comparable to what we got with sklearn's GBR. Feature importance shows <code>volatility_ratio</code> and <code>volatility_252d</code> dominating, similar pattern to article 3.</p>
 <hr />
 <h2>Direct Weight Prediction — The Idea</h2>
-<p>The standard approach (articles 2 &amp; 3): predict returns $\hat{r}_i$, then optimize weights $w_i$ given $\hat{r}_i$ and a covariance matrix $\Sigma$. Two separate stages that don't talk to each other.</p>
+<p>The standard approach (articles 2 &amp; 3): predict returns r̂ᵢ, then optimize weights wᵢ given r̂ᵢ and a covariance matrix Σ. Two separate stages that don't talk to each other.</p>
 <p>The idea here: <strong>skip the two-stage pipeline entirely</strong>. If we can learn what good allocations look like from historical data, we don't need the optimizer at test time.</p>
 <h3>Oracle Weight Targets</h3>
-<p>For each rebalancing date $t$ in the training set, we have access to the realised future returns $r_i^{(t)}$ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:</p>
-<p>$$w^{*(t)} = \arg\min_w \left[\gamma \cdot w^\top \Sigma w - w^\top r^{(t)}\right]$$</p>
-<p>subject to $\sum_i w_i = 1$ and $0 \le w_i \le 0.3$</p>
-<p>These $w^{*(t)}_i$ become training targets. The model learns:</p>
-<p>$$f(\text{features}_i^{(t)}) \approx w_i^{*(t)}$$</p>
+<p>For each rebalancing date <em>t</em> in the training set, we have access to the realised future returns rᵢ⁽ᵗ⁾ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:</p>
+<blockquote>
+<p><strong>w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]</strong></p>
+</blockquote>
+<p>subject to Σwᵢ = 1 and 0 ≤ wᵢ ≤ 0.3</p>
+<p>These w*ᵢ⁽ᵗ⁾ become training targets. The model learns:</p>
+<blockquote>
+<p><strong>f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾</strong></p>
+</blockquote>
 <h3>Why This Can Work</h3>
 <p>The key assumption: <strong>stocks that deserved high weight in the past share recognisable feature patterns</strong>. If volatility, momentum, and past returns carry predictive signal for which stocks will end up in the optimal portfolio, the model can learn that mapping without ever predicting returns explicitly.</p>
 <p>Think of it this way — the oracle weights encode everything the optimizer would have done with perfect information. Instead of learning returns and then optimizing, we learn the end result directly.</p>
 <h3>Inference</h3>
-<p>At test time, the model predicts a raw weight $\hat{w}_i$ for each stock. We apply:</p>
+<p>At test time, the model predicts a raw weight ŵᵢ for each stock. We apply:</p>
 <ol>
-<li>Floor negative predictions: $\hat{w}_i = \max(\hat{w}_i, 0)$</li>
-<li>Normalize: $\hat{w}_i = \hat{w}_i / \sum_j \hat{w}_j$</li>
+<li>Floor negative predictions: ŵᵢ = max(ŵᵢ, 0)</li>
+<li>Normalize: ŵᵢ = ŵᵢ / Σⱼ ŵⱼ</li>
 </ol>
 <p>No optimizer needed. Just clip and normalize.</p>
 <hr />
 <h2>Computing Oracle Weights</h2>
 <p>This part is computationally heavier than training the model. For each of the 56 quarterly training dates, we run Markowitz optimization on ~400 stocks using realized returns:</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">compute_oracle_weights</span>(df_q, cov_matrix, alloc_fun<span style="color: #666">=</span>neg_markowitz_objective):
-    weights <span style="color: #666">=</span> pd<span style="color: #666">.</span>Series(<span style="color: #666">0.0</span>, index<span style="color: #666">=</span>df_q<span style="color: #666">.</span>index)
+<pre><code class="language-python">def compute_oracle_weights(df_q, cov_matrix, alloc_fun=neg_markowitz_objective):
+    weights = pd.Series(0.0, index=df_q.index)
 
-    <span style="color: #008000; font-weight: bold">for</span> date, group <span style="color: #A2F; font-weight: bold">in</span> df_q<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Date&#39;</span>):
-        tickers <span style="color: #666">=</span> group[<span style="color: #BA2121">&#39;Ticker&#39;</span>]<span style="color: #666">.</span>values
-        returns <span style="color: #666">=</span> group[<span style="color: #BA2121">&#39;target&#39;</span>]<span style="color: #666">.</span>values
+    for date, group in df_q.groupby('Date'):
+        tickers = group['Ticker'].values
+        returns = group['target'].values
 
-        <span style="color: #3D7B7B; font-style: italic"># Filter: in covariance matrix, non-NaN, positive return</span>
-        in_cov <span style="color: #666">=</span> np<span style="color: #666">.</span>isin(tickers, cov_matrix<span style="color: #666">.</span>columns)
-        valid <span style="color: #666">=</span> in_cov <span style="color: #666">&amp;</span> <span style="color: #666">~</span>np<span style="color: #666">.</span>isnan(returns)
-        t_v <span style="color: #666">=</span> tickers[valid]
-        r_v <span style="color: #666">=</span> returns[valid]
+        # Filter: in covariance matrix, non-NaN, positive return
+        in_cov = np.isin(tickers, cov_matrix.columns)
+        valid = in_cov &amp; ~np.isnan(returns)
+        t_v = tickers[valid]
+        r_v = returns[valid]
 
-        pos <span style="color: #666">=</span> r_v <span style="color: #666">&gt;</span> <span style="color: #666">0</span>
-        <span style="color: #008000; font-weight: bold">if</span> pos<span style="color: #666">.</span>sum() <span style="color: #666">&lt;</span> <span style="color: #666">5</span>:
-            <span style="color: #008000; font-weight: bold">continue</span>
+        pos = r_v &gt; 0
+        if pos.sum() &lt; 5:
+            continue
 
-        t_pos <span style="color: #666">=</span> t_v[pos]
-        r_pos <span style="color: #666">=</span> r_v[pos]
-        cov_sub <span style="color: #666">=</span> cov_matrix<span style="color: #666">.</span>loc[t_pos, t_pos]<span style="color: #666">.</span>values
+        t_pos = t_v[pos]
+        r_pos = r_v[pos]
+        cov_sub = cov_matrix.loc[t_pos, t_pos].values
 
-        w <span style="color: #666">=</span> optimize_weights(r_pos, cov_sub, fun<span style="color: #666">=</span>alloc_fun)
-        weights<span style="color: #666">.</span>loc[group<span style="color: #666">.</span>index[valid][pos]] <span style="color: #666">=</span> w
+        w = optimize_weights(r_pos, cov_sub, fun=alloc_fun)
+        weights.loc[group.index[valid][pos]] = w
 
-    <span style="color: #008000; font-weight: bold">return</span> weights<span style="color: #666">.</span>values
-</code></pre></div>
-
+    return weights.values
+</code></pre>
 <p>Important nuance: most stocks get <strong>zero weight</strong> in the oracle allocation. The Markowitz optimizer concentrates on a handful of stocks. So the target distribution is heavily skewed — lots of zeros, a few positive values around 0.01–0.30. This makes regression harder than predicting returns, where the target distribution is roughly symmetric.</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>Non-zero training weights: 3251 / 22295 (14.6%)
+<pre><code>Non-zero training weights: 3251 / 22295 (14.6%)
 Non-zero validation weights: 842 / 5848 (14.4%)
 Mean non-zero weight (train): 0.0408
-</code></pre></div>
-
+</code></pre>
 <p>Only ~15% of training samples have non-zero target weight. The model needs to learn both <strong>which stocks to include</strong> and <strong>how much to allocate</strong>.</p>
 <hr />
 <h2>Training the Weight Model</h2>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>params_weight <span style="color: #666">=</span> {
-    <span style="color: #BA2121">&#39;objective&#39;</span>: <span style="color: #BA2121">&#39;regression&#39;</span>,
-    <span style="color: #BA2121">&#39;metric&#39;</span>: <span style="color: #BA2121">&#39;rmse&#39;</span>,
-    <span style="color: #BA2121">&#39;learning_rate&#39;</span>: <span style="color: #666">0.01</span>,
-    <span style="color: #BA2121">&#39;num_leaves&#39;</span>: <span style="color: #666">15</span>,
-    <span style="color: #BA2121">&#39;max_depth&#39;</span>: <span style="color: #666">3</span>,
-    <span style="color: #BA2121">&#39;subsample&#39;</span>: <span style="color: #666">0.8</span>,
-    <span style="color: #BA2121">&#39;colsample_bytree&#39;</span>: <span style="color: #666">0.8</span>,
-    <span style="color: #BA2121">&#39;min_child_samples&#39;</span>: <span style="color: #666">30</span>,
-    <span style="color: #BA2121">&#39;random_state&#39;</span>: <span style="color: #666">42</span>,
-    <span style="color: #BA2121">&#39;verbose&#39;</span>: <span style="color: #666">-1</span>,
+<pre><code class="language-python">params_weight = {
+    'objective': 'regression',
+    'metric': 'rmse',
+    'learning_rate': 0.01,
+    'num_leaves': 15,
+    'max_depth': 3,
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'min_child_samples': 30,
+    'random_state': 42,
+    'verbose': -1,
 }
 
-lgbm_weights <span style="color: #666">=</span> lgb<span style="color: #666">.</span>train(
+lgbm_weights = lgb.train(
     params_weight, dtrain_w,
-    num_boost_round<span style="color: #666">=1000</span>,
-    valid_sets<span style="color: #666">=</span>[dvalid_w],
-    callbacks<span style="color: #666">=</span>[lgb<span style="color: #666">.</span>early_stopping(<span style="color: #666">100</span>), lgb<span style="color: #666">.</span>log_evaluation(<span style="color: #666">100</span>)]
+    num_boost_round=1000,
+    valid_sets=[dvalid_w],
+    callbacks=[lgb.early_stopping(100), lgb.log_evaluation(100)]
 )
-</code></pre></div>
-
+</code></pre>
 <p>We use a lower learning rate and shallower trees compared to the MSE model — the weight targets are noisier (oracle weights are sensitive to small changes in realized returns).</p>
 <h3>Feature Importance Comparison</h3>
 <p><img alt="Feature Importance — LGBM-MSE vs LGBM-Weights" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article4_feature_importance_comparison.png" /></p>
@@ -222,14 +219,13 @@ lgbm_weights <span style="color: #666">=</span> lgb<span style="color: #666">.</
 <li><strong>LGBM-Weights</strong>: predict weights directly → clip negatives → normalize → done</li>
 </ol>
 <p>This gives us 2×4 + 1 = 9 strategies. The weight model's whole point is that it skips optimization.</p>
-<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #3D7B7B; font-style: italic"># LGBM-Weights: direct allocation (no optimizer)</span>
-w_pred <span style="color: #666">=</span> p_weights<span style="color: #666">.</span>loc[common_w]<span style="color: #666">.</span>values
-w_pred <span style="color: #666">=</span> np<span style="color: #666">.</span>maximum(w_pred, <span style="color: #666">0</span>)
-<span style="color: #008000; font-weight: bold">if</span> w_pred<span style="color: #666">.</span>sum() <span style="color: #666">&gt;</span> <span style="color: #666">1e-8</span>:
-    w_pred <span style="color: #666">=</span> w_pred <span style="color: #666">/</span> w_pred<span style="color: #666">.</span>sum()
-    results[date][<span style="color: #BA2121">&#39;returns_direct_lgbm_weights&#39;</span>] <span style="color: #666">=</span> (w_pred <span style="color: #666">*</span> future_w)<span style="color: #666">.</span>sum()
-</code></pre></div>
-
+<pre><code class="language-python"># LGBM-Weights: direct allocation (no optimizer)
+w_pred = p_weights.loc[common_w].values
+w_pred = np.maximum(w_pred, 0)
+if w_pred.sum() &gt; 1e-8:
+    w_pred = w_pred / w_pred.sum()
+    results[date]['returns_direct_lgbm_weights'] = (w_pred * future_w).sum()
+</code></pre>
 <hr />
 <h2>Results</h2>
 <p><img alt="Cumulative Quarterly Log Returns — All Strategies" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article4_cumulative_returns.png" /></p>
@@ -383,12 +379,12 @@ w_pred <span style="color: #666">=</span> np<span style="color: #666">.</span>ma
 <h3>Why Mean-Variance with Momentum Dominates</h3>
 <p>The one strategy that crushes everything is <code>mv_momentum</code>. Mean-variance optimization with momentum predictions benefits from the trending nature of the test period:</p>
 <ul>
-<li><strong>Momentum signals are clean when trends persist.</strong> In a sustained bull run, last quarter's winners keep winning. The return spread is large, so the $\hat{\mu}$ fed to the optimizer is accurate and well-separated from noise.</li>
+<li><strong>Momentum signals are clean when trends persist.</strong> In a sustained bull run, last quarter's winners keep winning. The return spread is large, so the μ̂ fed to the optimizer is accurate and well-separated from noise.</li>
 <li><strong>The optimizer amplifies correct signals.</strong> Mean-variance concentrates on high-predicted-return stocks while diversifying risk. When predictions are directionally right, this amplification produces outsized returns.</li>
 <li><strong>Volatility structure is stable in trends.</strong> Covariance estimated from recent data reflects the regime well. Correlations don't spike randomly like in crashes, so risk estimates remain useful.</li>
 <li><strong>The 30% cap prevents worst-case overconcentration</strong> but still allows heavy bets on top picks — exactly what works when momentum is correct.</li>
 </ul>
-<p>However, mean-variance is fragile in non-trending markets. When expected returns $\mu \approx 0$ for most stocks, the optimizer chases noise: tiny estimation errors get amplified into large weight swings, turnover spikes, and the portfolio degrades to a noisy version of min-variance. The direct weight prediction approach should be more robust in those regimes because it learns a stable mapping from features to allocations rather than relying on a point estimate of $\mu$.</p>
+<p>However, mean-variance is fragile in non-trending markets. When expected returns μ ≈ 0 for most stocks, the optimizer chases noise: tiny estimation errors get amplified into large weight swings, turnover spikes, and the portfolio degrades to a noisy version of min-variance. The direct weight prediction approach should be more robust in those regimes because it learns a stable mapping from features to allocations rather than relying on a point estimate of μ.</p>
 <hr />
 <h2>Conclusion</h2>
 <p>Predicting portfolio weights directly is conceptualy simpler than the two-stage pipeline: no optimizer at inference, just a forward pass. The model achieves the second highest total return (0.36) while requiring zero post-hoc optimization.</p>
