@@ -102,17 +102,13 @@ The idea here: **skip the two-stage pipeline entirely**. If we can learn what go
 
 For each rebalancing date *t* in the training set, we have access to the realised future returns rᵢ⁽ᵗ⁾ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:
 
-```
-w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]
+> **w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]**
 
-subject to  Σ wᵢ = 1  and  0 ≤ wᵢ ≤ 0.3
-```
+subject to Σwᵢ = 1 and 0 ≤ wᵢ ≤ 0.3
 
 These w*ᵢ⁽ᵗ⁾ become training targets. The model learns:
 
-```
-f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾
-```
+> **f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾**
 
 ### Why This Can Work
 
