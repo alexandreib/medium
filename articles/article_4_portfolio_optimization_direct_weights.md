@@ -1,6 +1,6 @@
 # Portfolio Optimization on S&P 500 — Predicting Allocation Weights Directly
 
-In the [previous article](https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-with-ml-predictions), we trained ML models (Linear Regression, GBT) to **predict quarterly returns**, then fed those predictions into portfolio optimization. The whole pipeline was: predict returns → filter positive → optimize weights. Two separate stages. The model doesn't know what the optimizer will do with its output, and the optimizer doesnt care how the model was trained.
+In the [previous article](https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-predicting-returns-with-ml-609ad179c03f), we trained ML models (Linear Regression, GBT) to **predict quarterly returns**, then fed those predictions into portfolio optimization. The whole pipeline was: predict returns → filter positive → optimize weights. Two separate stages. The model doesn't know what the optimizer will do with its output, and the optimizer doesnt care how the model was trained.
 
 But is that really optimal? Minimizing MSE on individual stock returns is not the same as producing a good portfolio. A model can be great at predicting large-cap stable stocks (low variance, low alpha) and terrible at the volatile ones that actually drive portfolio performance. The optimizer then has to salvage whatever the model gives it.
 
@@ -25,7 +25,7 @@ Same dataset — S&P 500 constituents with 20 years of daily prices. Same 8 feat
 | `volatility_ratio` | Ratio of 63d / 252d volatility |
 | `mean_reversion` | Price deviation from 252d moving average |
 
-If you haven't read [article 3](https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-with-ml-predictions), check it for the feature definitions and train/valid/test split logic. Same temporal split: 70/15/15.
+If you haven't read [article 3](https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-predicting-returns-with-ml-609ad179c03f), check it for the feature definitions and train/valid/test split logic. Same temporal split: 70/15/15.
 
 ```python
 df = pd.read_csv('../data/sp500_20years.csv')
@@ -102,13 +102,17 @@ The idea here: **skip the two-stage pipeline entirely**. If we can learn what go
 
 For each rebalancing date *t* in the training set, we have access to the realised future returns rᵢ⁽ᵗ⁾ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:
 
-> **w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]**
+```
+w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]
 
-subject to Σwᵢ = 1 and 0 ≤ wᵢ ≤ 0.3
+subject to  Σ wᵢ = 1  and  0 ≤ wᵢ ≤ 0.3
+```
 
 These w*ᵢ⁽ᵗ⁾ become training targets. The model learns:
 
-> **f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾**
+```
+f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾
+```
 
 ### Why This Can Work
 
