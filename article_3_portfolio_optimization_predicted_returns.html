@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Portfolio Optimization on S&P 500 Stocks — Predicting Returns with ML</title>
+    <style>
+        body { font-family: Georgia, serif; max-width: 740px; margin: 2rem auto; padding: 0 1rem; line-height: 1.7; color: #222; }
+        h1 { font-size: 2rem; }
+        h2 { font-size: 1.5rem; margin-top: 2rem; }
+        h3 { font-size: 1.25rem; }
+        pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; border-radius: 4px; }
+        code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.9em; }
+        table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+        th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+        th { background: #f5f5f5; }
+        img { max-width: 100%; height: auto; display: block; margin: 1.5rem auto; }
+        blockquote { border-left: 3px solid #ccc; margin: 1rem 0; padding-left: 1rem; color: #555; }
+        hr { border: none; border-top: 1px solid #ddd; margin: 2rem 0; }
+    </style>
+</head>
+<body>
+<h1>Portfolio Optimization on S&amp;P 500 Stocks — Predicting Returns with ML</h1>
+<p>In the <a href="https://medium.com/@alexandre.durand/portfolio-optimisation-on-s-p-500-stocks-46f03732b030">first article</a>, we explored the theoretical foundations of portfolio optimization.
+In the <a href="https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-with-backtest-61da87ed91ff">second article</a>, we backtested three portfolio strategies using past quarterly returns as our "prediction" — essentially a momentum bet.</p>
+<p>The obvious weakness? Using last quarter's return to predict next quarter's return is a rough heuristic at best. In this third notebook, we build actual predictive models — <strong>Linear Regression</strong> and <strong>Gradient Boosted Trees</strong> — trained on a set of features to forecast quarterly log returns. We then plug those predictions into the same portfolio optimization framework and compare against the momentum baseline from article 2.</p>
+<h2>Contents:</h2>
+<p><strong>Feature Engineering:</strong> Build predictive features from price and volume data.</p>
+<p><strong>Model Training:</strong> Fit Linear Regression and Gradient Boosted Trees on historical data.</p>
+<p><strong>Return Prediction:</strong> Generate predicted quarterly log returns on test period.</p>
+<p><strong>Portfolio Allocation &amp; Backtest:</strong> For each of the 3 prediction methods (Previous Quarter Return, Linear Regression, GBT), allocate weights using 4 strategies — Random, Max Sharpe Ratio, Min Variance, and Markowitz Mean-Variance.</p>
+<p><strong>Comparison:</strong> 3 × 4 = 12 strategy combinations, plus analysis of which prediction + allocation pairing works best.</p>
+<hr />
+<h2>Feature Engineering</h2>
+<p>The idea is simple — give the model enough historical signal to form a view on next quarter's return. We compute the following features at each rebalancing date, per ticker:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Definition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ret_q1</code></td>
+<td>Quarterly log return, lag 1 (previous quarter)</td>
+</tr>
+<tr>
+<td><code>ret_q2</code></td>
+<td>Quarterly log return, lag 2</td>
+</tr>
+<tr>
+<td><code>ret_q4</code></td>
+<td>Quarterly log return, lag 4 (1 year ago)</td>
+</tr>
+<tr>
+<td><code>volatility_63d</code></td>
+<td>Rolling 63-day std of daily log returns</td>
+</tr>
+<tr>
+<td><code>volatility_252d</code></td>
+<td>Rolling 252-day std of daily log returns</td>
+</tr>
+<tr>
+<td><code>mom_12_1</code></td>
+<td>12-month return minus last month return (classic momentum signal)</td>
+</tr>
+<tr>
+<td><code>volatility_ratio</code></td>
+<td>Ratio of 63d / 252d volatility (volatility regime indicator)</td>
+</tr>
+<tr>
+<td><code>mean_reversion</code></td>
+<td>Deviation of current price from 252d moving average</td>
+</tr>
+</tbody>
+</table>
+<p>These are standard quantitative finance features — nothing exotic, but they capture momentum, mean-reversion, volatility regimes and relative activity shifts.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #3D7B7B; font-style: italic"># Calculate daily log returns — per ticker to avoid cross-ticker contamination</span>
+df[<span style="color: #BA2121">&#39;Log_Return&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Adj Close&#39;</span>]<span style="color: #666">.</span>transform(<span style="color: #008000; font-weight: bold">lambda</span> x: np<span style="color: #666">.</span>log(x <span style="color: #666">/</span> x<span style="color: #666">.</span>shift(<span style="color: #666">1</span>)))
+
+days <span style="color: #666">=</span> <span style="color: #666">63</span> <span style="color: #3D7B7B; font-style: italic"># quarterly rebalancing window</span>
+df[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]\
+    <span style="color: #666">.</span>rolling(window<span style="color: #666">=</span>days, min_periods<span style="color: #666">=</span>days)<span style="color: #666">.</span>sum()\
+    <span style="color: #666">.</span>reset_index(<span style="color: #666">0</span>, drop<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+
+<span style="color: #3D7B7B; font-style: italic"># Features per ticker</span>
+<span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">compute_features</span>(group):
+    g <span style="color: #666">=</span> group<span style="color: #666">.</span>sort_values(<span style="color: #BA2121">&#39;Date&#39;</span>)<span style="color: #666">.</span>copy()
+
+    <span style="color: #3D7B7B; font-style: italic"># Lagged quarterly returns</span>
+    g[<span style="color: #BA2121">&#39;ret_q1&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>]<span style="color: #666">.</span>shift(days)
+    g[<span style="color: #BA2121">&#39;ret_q2&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>]<span style="color: #666">.</span>shift(days <span style="color: #666">*</span> <span style="color: #666">2</span>)
+    g[<span style="color: #BA2121">&#39;ret_q4&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>]<span style="color: #666">.</span>shift(days <span style="color: #666">*</span> <span style="color: #666">4</span>)
+
+    <span style="color: #3D7B7B; font-style: italic"># Volatility</span>
+    g[<span style="color: #BA2121">&#39;volatility_63d&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]<span style="color: #666">.</span>rolling(<span style="color: #666">63</span>)<span style="color: #666">.</span>std()
+    g[<span style="color: #BA2121">&#39;volatility_252d&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]<span style="color: #666">.</span>rolling(<span style="color: #666">252</span>)<span style="color: #666">.</span>std()
+
+    <span style="color: #3D7B7B; font-style: italic"># Momentum 12-1</span>
+    ret_12m <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]<span style="color: #666">.</span>rolling(<span style="color: #666">252</span>)<span style="color: #666">.</span>sum()
+    ret_1m <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Log_Return&#39;</span>]<span style="color: #666">.</span>rolling(<span style="color: #666">21</span>)<span style="color: #666">.</span>sum()
+    g[<span style="color: #BA2121">&#39;mom_12_1&#39;</span>] <span style="color: #666">=</span> ret_12m <span style="color: #666">-</span> ret_1m
+
+    <span style="color: #3D7B7B; font-style: italic"># Volatility ratio (short-term vs long-term vol regime)</span>
+    g[<span style="color: #BA2121">&#39;volatility_ratio&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;volatility_63d&#39;</span>] <span style="color: #666">/</span> g[<span style="color: #BA2121">&#39;volatility_252d&#39;</span>]
+
+    <span style="color: #3D7B7B; font-style: italic"># Mean reversion signal</span>
+    g[<span style="color: #BA2121">&#39;mean_reversion&#39;</span>] <span style="color: #666">=</span> g[<span style="color: #BA2121">&#39;Adj Close&#39;</span>] <span style="color: #666">/</span> g[<span style="color: #BA2121">&#39;Adj Close&#39;</span>]<span style="color: #666">.</span>rolling(<span style="color: #666">252</span>)<span style="color: #666">.</span>mean() <span style="color: #666">-</span> <span style="color: #666">1</span>
+
+    <span style="color: #008000; font-weight: bold">return</span> g
+
+df <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>, group_keys<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">False</span>)<span style="color: #666">.</span>apply(compute_features)
+</code></pre></div>
+
+<p>Quick sanity check — let's look at the correlation of individual features with future quarterly return:</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>feature_cols <span style="color: #666">=</span> [<span style="color: #BA2121">&#39;ret_q1&#39;</span>,<span style="color: #BA2121">&#39;ret_q2&#39;</span>,<span style="color: #BA2121">&#39;ret_q4&#39;</span>,<span style="color: #BA2121">&#39;volatility_63d&#39;</span>,
+                <span style="color: #BA2121">&#39;volatility_252d&#39;</span>,<span style="color: #BA2121">&#39;mom_12_1&#39;</span>,<span style="color: #BA2121">&#39;volatility_ratio&#39;</span>,<span style="color: #BA2121">&#39;mean_reversion&#39;</span>]
+
+<span style="color: #3D7B7B; font-style: italic"># Target : next quarter return</span>
+df[<span style="color: #BA2121">&#39;target&#39;</span>] <span style="color: #666">=</span> df<span style="color: #666">.</span>groupby(<span style="color: #BA2121">&#39;Ticker&#39;</span>)[<span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>]<span style="color: #666">.</span>shift(<span style="color: #666">-</span>days)
+
+corr <span style="color: #666">=</span> df[feature_cols <span style="color: #666">+</span> [<span style="color: #BA2121">&#39;target&#39;</span>]]<span style="color: #666">.</span>corr()[<span style="color: #BA2121">&#39;target&#39;</span>]<span style="color: #666">.</span>drop(<span style="color: #BA2121">&#39;target&#39;</span>)
+display(corr<span style="color: #666">.</span>sort_values(ascending<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">False</span>))
+</code></pre></div>
+
+<p><img alt="Feature Correlation with Future Quarterly Return" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_feature_correlation.png" /></p>
+<p>The correlations are small (as expected in financial data), but not zero. <code>volatility_252d</code> (+0.114) and <code>volatility_63d</code> (+0.067) show the strongest positive correlation with future returns — higher-vol stocks tend to deliver higher returns (the classic risk premium). <code>ret_q4</code> is mildly positive. On the negative side, <code>mom_12_1</code> (−0.031) and <code>ret_q1</code> (−0.027) suggest short-term reversal effects.</p>
+<hr />
+<h2>Split Data</h2>
+<p>Same split logic as article 2 : Train / Valid / Test. The covariance matrix is estimated on the validation set. Models are trained on training data only.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>dates <span style="color: #666">=</span> <span style="color: #008000">list</span>(df[<span style="color: #BA2121">&#39;Date&#39;</span>]<span style="color: #666">.</span>unique())
+
+dates_train <span style="color: #666">=</span> dates[:<span style="color: #008000">int</span>(<span style="color: #008000">len</span>(dates) <span style="color: #666">*</span> <span style="color: #666">0.7</span>)]
+dates_valid <span style="color: #666">=</span> dates[<span style="color: #008000">int</span>(<span style="color: #008000">len</span>(dates) <span style="color: #666">*</span> <span style="color: #666">0.7</span>) : <span style="color: #008000">int</span>(<span style="color: #008000">len</span>(dates) <span style="color: #666">*</span> <span style="color: #666">0.85</span>)]
+dates_test  <span style="color: #666">=</span> dates[<span style="color: #008000">int</span>(<span style="color: #008000">len</span>(dates) <span style="color: #666">*</span> <span style="color: #666">0.85</span>):]
+dates_test_rebalance <span style="color: #666">=</span> dates_test[<span style="color: #666">0</span>::days]  <span style="color: #3D7B7B; font-style: italic"># 1 rebalancing every 63 days</span>
+
+train <span style="color: #666">=</span> df[df[<span style="color: #BA2121">&#39;Date&#39;</span>]<span style="color: #666">.</span>isin(dates_train)]<span style="color: #666">.</span>dropna(subset<span style="color: #666">=</span>feature_cols <span style="color: #666">+</span> [<span style="color: #BA2121">&#39;target&#39;</span>])
+valid <span style="color: #666">=</span> df[df[<span style="color: #BA2121">&#39;Date&#39;</span>]<span style="color: #666">.</span>isin(dates_valid)]
+test  <span style="color: #666">=</span> df[df[<span style="color: #BA2121">&#39;Date&#39;</span>]<span style="color: #666">.</span>isin(dates_test)]
+</code></pre></div>
+
+<p>Output :</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>train :  1411253 rows | 2006-02-24 -&gt; 2020-02-14
+valid :   379262 rows | 2020-02-18 -&gt; 2023-02-13
+test  :   379765 rows | 2023-02-14 -&gt; 2026-02-18
+test rebalancing dates : 12
+</code></pre></div>
+
+<p>So we train on ~14 years of data, validate on ~3 years, and test on the most recent ~3 years (2023–2026). This test window covers the post-inflation recovery, the 2023–2024 AI-driven rally, and the 2025 consolidation — a fairly turbulent stretch.</p>
+<p>Covariance matrice on validation data (same as article 2) :</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>pivot_returns_valid <span style="color: #666">=</span> valid<span style="color: #666">.</span>pivot_table(values<span style="color: #666">=</span><span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>,
+                                         columns<span style="color: #666">=</span><span style="color: #BA2121">&#39;Ticker&#39;</span>, index<span style="color: #666">=</span><span style="color: #BA2121">&#39;Date&#39;</span>)<span style="color: #666">.</span>fillna(<span style="color: #666">0</span>)
+matrix_covariance <span style="color: #666">=</span> calculate_shrink_cov_matrix(pivot_returns_valid)
+matrix_covariance <span style="color: #666">=</span> pd<span style="color: #666">.</span>DataFrame(matrix_covariance,
+                                  columns<span style="color: #666">=</span>pivot_returns_valid<span style="color: #666">.</span>columns,
+                                  index<span style="color: #666">=</span>pivot_returns_valid<span style="color: #666">.</span>columns)
+</code></pre></div>
+
+<hr />
+<h2>Model Training</h2>
+<h3>Linear Regression</h3>
+<p>Nothing fancy. We standardize features (important for regularization stability) and fit a simple OLS. We could add Ridge or Lasso but let's keep it minimal first.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">from</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">sklearn.linear_model</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">import</span> LinearRegression
+<span style="color: #008000; font-weight: bold">from</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">sklearn.preprocessing</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">import</span> StandardScaler
+
+scaler <span style="color: #666">=</span> StandardScaler()
+X_train <span style="color: #666">=</span> scaler<span style="color: #666">.</span>fit_transform(train[feature_cols])
+y_train <span style="color: #666">=</span> train[<span style="color: #BA2121">&#39;target&#39;</span>]<span style="color: #666">.</span>values
+
+lr_model <span style="color: #666">=</span> LinearRegression()
+lr_model<span style="color: #666">.</span>fit(X_train, y_train)
+
+<span style="color: #3D7B7B; font-style: italic"># Feature importance (coefficients)</span>
+coef_df <span style="color: #666">=</span> pd<span style="color: #666">.</span>DataFrame({<span style="color: #BA2121">&#39;feature&#39;</span>: feature_cols, <span style="color: #BA2121">&#39;coef&#39;</span>: lr_model<span style="color: #666">.</span>coef_})
+display(coef_df<span style="color: #666">.</span>sort_values(<span style="color: #BA2121">&#39;coef&#39;</span>, ascending<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">False</span>))
+
+<span style="color: #008000">print</span>(<span style="color: #BA2121">f&quot;Train R² : </span><span style="color: #A45A77; font-weight: bold">{</span>lr_model<span style="color: #666">.</span>score(X_train,<span style="color: #BBB"> </span>y_train)<span style="color: #A45A77; font-weight: bold">:</span><span style="color: #BA2121">.4f</span><span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&quot;</span>)
+</code></pre></div>
+
+<p><img alt="Linear Regression — Standardized Coefficients" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_lr_coefficients.png" /></p>
+<p><strong>Train R² = 0.0195</strong> — about 1.9%. The R² is low, as expected for quarterly stock return predictions. Don't be alarmed. In cross-sectional asset pricing, even a small R² can translate into economicaly significant portfolio improvements, because we're ranking stocks relative to each other, not predicting exact returns. The largest positive coefficient is <code>volatility_252d</code> (long-term vol premium), followed by <code>volatility_ratio</code> and <code>ret_q4</code>. Negative coefficients on <code>volatility_63d</code> and <code>ret_q1</code> suggest that short-term high-vol and recent winners tend to revert.</p>
+<h3>Gradient Boosted Trees</h3>
+<p><code>GradientBoostingRegressor</code> from sklearn is well suited here because it handles non-linear interactions between features (e.g. momentum behaves differently in high vs low volatility regimes).</p>
+<p>We use modest hyperparameters to avoid overfitting — financial data is notoriously noisy.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">from</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">sklearn.ensemble</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">import</span> GradientBoostingRegressor
+
+gbr_model <span style="color: #666">=</span> GradientBoostingRegressor(
+    n_estimators<span style="color: #666">=200</span>,
+    max_depth<span style="color: #666">=4</span>,
+    learning_rate<span style="color: #666">=0.05</span>,
+    subsample<span style="color: #666">=0.7</span>,
+    min_samples_leaf<span style="color: #666">=50</span>,
+    random_state<span style="color: #666">=42</span>
+)
+
+gbr_model<span style="color: #666">.</span>fit(X_train, y_train)
+<span style="color: #008000">print</span>(<span style="color: #BA2121">f&quot;GBR Train R² : </span><span style="color: #A45A77; font-weight: bold">{</span>gbr_model<span style="color: #666">.</span>score(X_train,<span style="color: #BBB"> </span>y_train)<span style="color: #A45A77; font-weight: bold">:</span><span style="color: #BA2121">.4f</span><span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&quot;</span>)
+</code></pre></div>
+
+<p><strong>GBR Train R² = 0.1026</strong> — about 10%, which is substantially higher than the linear model. That's partly because the tree model can fit non-linear patterns, but also partly overfitting. The conservative hyperparameters (<code>min_samples_leaf=50</code>, <code>subsample=0.7</code>) help, but we should remain skeptical about out-of-sample performance.</p>
+<p>Let's check feature importance :</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>fi <span style="color: #666">=</span> pd<span style="color: #666">.</span>DataFrame({<span style="color: #BA2121">&#39;feature&#39;</span>: feature_cols, <span style="color: #BA2121">&#39;importance&#39;</span>: gbr_model<span style="color: #666">.</span>feature_importances_})
+fi <span style="color: #666">=</span> fi<span style="color: #666">.</span>sort_values(<span style="color: #BA2121">&#39;importance&#39;</span>, ascending<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+fi<span style="color: #666">.</span>plot(kind<span style="color: #666">=</span><span style="color: #BA2121">&#39;barh&#39;</span>, x<span style="color: #666">=</span><span style="color: #BA2121">&#39;feature&#39;</span>, y<span style="color: #666">=</span><span style="color: #BA2121">&#39;importance&#39;</span>)
+plt<span style="color: #666">.</span>title(<span style="color: #BA2121">&#39;Gradient Boosted Trees — Feature Importance (Impurity)&#39;</span>)
+plt<span style="color: #666">.</span>show()
+</code></pre></div>
+
+<p><img alt="Gradient Boosted Trees — Feature Importance" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_gbr_feature_importance.png" /></p>
+<p><code>volatility_ratio</code> dominates (≈0.21 importance), followed by <code>ret_q1</code> and <code>volatility_252d</code>. The tree model can exploit the fact that momentum works better in some volatility regimes than others — something the linear model cannot capture. Interestingly, <code>mom_12_1</code> ranks lowest in importance for the GBR, while <code>ret_q1</code> (which was negative in the linear model) is the second most important split feature. The tree model is finding non-linear structure in the interaction between recent returns and volatility regimes.</p>
+<hr />
+<h2>Prediction Function</h2>
+<p>We wrap prediction in a helper that takes a date's feature data and returns predicted returns per ticker for both models.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">predict_returns</span>(df_date, feature_cols, scaler, lr_model, gbr_model):
+<span style="color: #BBB">    </span><span style="color: #BA2121; font-style: italic">&quot;&quot;&quot;Predict quarterly log returns for all tickers at a given date.&quot;&quot;&quot;</span>
+    valid_mask <span style="color: #666">=</span> df_date[feature_cols]<span style="color: #666">.</span>notna()<span style="color: #666">.</span>all(axis<span style="color: #666">=1</span>)
+    df_valid <span style="color: #666">=</span> df_date[valid_mask]
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #008000">len</span>(df_valid) <span style="color: #666">==</span> <span style="color: #666">0</span>:
+        <span style="color: #008000; font-weight: bold">return</span> pd<span style="color: #666">.</span>DataFrame()
+
+    X <span style="color: #666">=</span> df_valid[feature_cols]<span style="color: #666">.</span>values
+    X_scaled <span style="color: #666">=</span> scaler<span style="color: #666">.</span>transform(X)
+
+    preds_lr  <span style="color: #666">=</span> lr_model<span style="color: #666">.</span>predict(X_scaled)
+    preds_gbr <span style="color: #666">=</span> gbr_model<span style="color: #666">.</span>predict(X_scaled)
+
+    <span style="color: #008000; font-weight: bold">return</span> pd<span style="color: #666">.</span>DataFrame({
+        <span style="color: #BA2121">&#39;Ticker&#39;</span>: df_valid[<span style="color: #BA2121">&#39;Ticker&#39;</span>]<span style="color: #666">.</span>values,
+        <span style="color: #BA2121">&#39;pred_lr&#39;</span>: preds_lr,
+        <span style="color: #BA2121">&#39;pred_gbr&#39;</span>: preds_gbr
+    })<span style="color: #666">.</span>set_index(<span style="color: #BA2121">&#39;Ticker&#39;</span>)
+</code></pre></div>
+
+<hr />
+<h2>Portfolio Optimization Functions</h2>
+<p>Same as the previous articles — reused directly (see <a href="https://medium.com/@alexandre.durand/portfolio-optimisation-on-s-p-500-stocks-46f03732b030">article 1</a> for detailled explanations).</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">calculate_portfolio_variance</span>(weights, cov_matrix):
+    <span style="color: #008000; font-weight: bold">return</span> np<span style="color: #666">.</span>dot(weights<span style="color: #666">.</span>T, np<span style="color: #666">.</span>dot(cov_matrix, weights))
+
+<span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">calculate_portfolio_returns</span>(weights, returns):
+    <span style="color: #008000; font-weight: bold">return</span> np<span style="color: #666">.</span>dot(weights, returns)
+
+<span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">neg_sharpe_ratio_objective</span>(weights, returns, cov_matrix, risk_free_rate<span style="color: #666">=0.03</span>):
+    portfolio_returns <span style="color: #666">=</span> np<span style="color: #666">.</span>squeeze(calculate_portfolio_returns(weights, returns))
+    portfolio_variance <span style="color: #666">=</span> np<span style="color: #666">.</span>squeeze(calculate_portfolio_variance(weights, cov_matrix))
+    <span style="color: #008000; font-weight: bold">return</span> <span style="color: #666">-</span>((portfolio_returns <span style="color: #666">-</span> risk_free_rate) <span style="color: #666">/</span> np<span style="color: #666">.</span>sqrt(portfolio_variance))
+
+<span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">neg_markowitz_objective</span>(weights, returns, cov_matrix, gamma<span style="color: #666">=0.2</span>):
+    portfolio_returns <span style="color: #666">=</span> np<span style="color: #666">.</span>squeeze(calculate_portfolio_returns(weights, returns))
+    portfolio_variance <span style="color: #666">=</span> np<span style="color: #666">.</span>squeeze(calculate_portfolio_variance(weights, cov_matrix))
+    <span style="color: #008000; font-weight: bold">return</span> gamma <span style="color: #666">*</span> portfolio_variance <span style="color: #666">-</span> portfolio_returns
+
+<span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">optimize_weights</span>(log_returns, covariance_matrix, fun<span style="color: #666">=</span>neg_markowitz_objective, x0<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">None</span>):
+    number_of_tickers <span style="color: #666">=</span> <span style="color: #008000">len</span>(log_returns)
+    <span style="color: #008000; font-weight: bold">if</span> x0 <span style="color: #A2F; font-weight: bold">is</span> <span style="color: #008000; font-weight: bold">None</span>:
+        x0 <span style="color: #666">=</span> np<span style="color: #666">.</span>array([<span style="color: #666">1/</span>number_of_tickers <span style="color: #008000; font-weight: bold">for</span> _ <span style="color: #A2F; font-weight: bold">in</span> <span style="color: #008000">range</span>(number_of_tickers)])
+    <span style="color: #008000; font-weight: bold">if</span> fun <span style="color: #666">==</span> calculate_portfolio_variance:
+        args <span style="color: #666">=</span> (covariance_matrix,)
+    <span style="color: #008000; font-weight: bold">else</span>:
+        args <span style="color: #666">=</span> (log_returns, covariance_matrix)
+    result <span style="color: #666">=</span> sp_opt<span style="color: #666">.</span>minimize(
+        fun<span style="color: #666">=</span>fun, args<span style="color: #666">=</span>args, x0<span style="color: #666">=</span>x0, method<span style="color: #666">=</span><span style="color: #BA2121">&#39;SLSQP&#39;</span>,
+        bounds<span style="color: #666">=</span><span style="color: #008000">tuple</span>((<span style="color: #666">0</span>, <span style="color: #666">0.3</span>) <span style="color: #008000; font-weight: bold">for</span> _ <span style="color: #A2F; font-weight: bold">in</span> <span style="color: #008000">range</span>(number_of_tickers)),
+        constraints<span style="color: #666">=</span>({<span style="color: #BA2121">&#39;type&#39;</span>: <span style="color: #BA2121">&#39;eq&#39;</span>, <span style="color: #BA2121">&#39;fun&#39;</span>: <span style="color: #008000; font-weight: bold">lambda</span> weights: np<span style="color: #666">.</span>sum(weights) <span style="color: #666">-</span> <span style="color: #666">1</span>})
+    )
+    <span style="color: #008000; font-weight: bold">return</span> result<span style="color: #666">.</span>x
+</code></pre></div>
+
+<hr />
+<h2>Backtest Loop</h2>
+<p>This is where it gets interesting. For each rebalancing date in the test period, we:</p>
+<ol>
+<li><strong>Predict returns</strong> using 3 methods : previous quarter return (momentum), Linear Regression, Gradient Boosted Trees</li>
+<li><strong>Filter</strong> tickers with positive predicted returns (same logic as before — we only go long)</li>
+<li><strong>Optimize weights</strong> using 4 allocation strategies per prediction method :</li>
+<li><strong>Random</strong> : uniform random weights (sanity check baseline)</li>
+<li><strong>Max Sharpe Ratio</strong> : maximize risk-adjusted return</li>
+<li><strong>Min Variance</strong> : minimize portfolio variance (ignores predicted returns entirely)</li>
+<li><strong>Markowitz Mean-Variance</strong> : maximize return − γ × variance tradeoff</li>
+<li><strong>Compute actual realised return</strong> of the portfolio</li>
+</ol>
+<p>This gives us 3 prediction × 4 allocation = 12 strategy combinations.</p>
+<div class="highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>pivot_returns_test <span style="color: #666">=</span> test_rebalance<span style="color: #666">.</span>pivot_table(
+    values<span style="color: #666">=</span><span style="color: #BA2121">&#39;Quarterly_Log_Return&#39;</span>, columns<span style="color: #666">=</span><span style="color: #BA2121">&#39;Ticker&#39;</span>, index<span style="color: #666">=</span><span style="color: #BA2121">&#39;Date&#39;</span>)<span style="color: #666">.</span>fillna(<span style="color: #666">0</span>)
+
+np<span style="color: #666">.</span>random<span style="color: #666">.</span>seed(<span style="color: #666">42</span>)
+
+results <span style="color: #666">=</span> {}
+<span style="color: #008000; font-weight: bold">for</span> idx <span style="color: #A2F; font-weight: bold">in</span> <span style="color: #008000">range</span>(<span style="color: #666">0</span>, <span style="color: #008000">len</span>(pivot_returns_test) <span style="color: #666">-</span> <span style="color: #666">1</span>):
+    date <span style="color: #666">=</span> pivot_returns_test<span style="color: #666">.</span>iloc[idx]<span style="color: #666">.</span>name
+    results[date] <span style="color: #666">=</span> {}
+    tickers_returns_future <span style="color: #666">=</span> pivot_returns_test<span style="color: #666">.</span>iloc[idx <span style="color: #666">+</span> <span style="color: #666">1</span>]   <span style="color: #3D7B7B; font-style: italic"># forward return (next quarter)</span>
+    tickers_returns_momentum <span style="color: #666">=</span> pivot_returns_test<span style="color: #666">.</span>iloc[idx]     <span style="color: #3D7B7B; font-style: italic"># momentum signal (last quarter)</span>
+
+    <span style="color: #3D7B7B; font-style: italic"># Get ML predictions for this date</span>
+    df_date <span style="color: #666">=</span> test_rebalance[test_rebalance[<span style="color: #BA2121">&#39;Date&#39;</span>] <span style="color: #666">==</span> date]
+    preds <span style="color: #666">=</span> predict_returns(df_date, feature_cols, scaler, lr_model, gbr_model)
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #008000">len</span>(preds) <span style="color: #666">==</span> <span style="color: #666">0</span>:
+        <span style="color: #008000; font-weight: bold">continue</span>
+
+    <span style="color: #008000; font-weight: bold">for</span> pred_name, pred_series <span style="color: #A2F; font-weight: bold">in</span> [(<span style="color: #BA2121">&#39;momentum&#39;</span>, tickers_returns_momentum),
+                                     (<span style="color: #BA2121">&#39;lr&#39;</span>, preds[<span style="color: #BA2121">&#39;pred_lr&#39;</span>]),
+                                     (<span style="color: #BA2121">&#39;gbr&#39;</span>, preds[<span style="color: #BA2121">&#39;pred_gbr&#39;</span>])]:
+
+        <span style="color: #3D7B7B; font-style: italic"># Align tickers</span>
+        common_tickers <span style="color: #666">=</span> <span style="color: #008000">list</span>(<span style="color: #008000">set</span>(pred_series<span style="color: #666">.</span>index) <span style="color: #666">&amp;</span> <span style="color: #008000">set</span>(tickers_returns_future<span style="color: #666">.</span>index)
+                              <span style="color: #666">&amp;</span> <span style="color: #008000">set</span>(matrix_covariance<span style="color: #666">.</span>columns))
+        <span style="color: #008000; font-weight: bold">if</span> <span style="color: #008000">len</span>(common_tickers) <span style="color: #666">&lt;</span> <span style="color: #666">5</span>: <span style="color: #008000; font-weight: bold">continue</span>
+
+        pred_filtered <span style="color: #666">=</span> pred_series<span style="color: #666">.</span>loc[common_tickers]
+        future_filtered <span style="color: #666">=</span> tickers_returns_future<span style="color: #666">.</span>loc[common_tickers]
+
+        <span style="color: #3D7B7B; font-style: italic"># Keep only positive predictions</span>
+        mask_positive <span style="color: #666">=</span> pred_filtered<span style="color: #666">.</span>values <span style="color: #666">&gt;</span> <span style="color: #666">0</span>
+        <span style="color: #008000; font-weight: bold">if</span> mask_positive<span style="color: #666">.</span>sum() <span style="color: #666">&lt;</span> <span style="color: #666">5</span>: <span style="color: #008000; font-weight: bold">continue</span>
+
+        t <span style="color: #666">=</span> np<span style="color: #666">.</span>array(common_tickers)[mask_positive]
+        pred_pos <span style="color: #666">=</span> pred_filtered<span style="color: #666">.</span>values[mask_positive]
+        future_pos <span style="color: #666">=</span> future_filtered<span style="color: #666">.</span>values[mask_positive]
+        cov_filtered <span style="color: #666">=</span> matrix_covariance<span style="color: #666">.</span>loc[t, t]<span style="color: #666">.</span>values
+
+        <span style="color: #3D7B7B; font-style: italic"># Random allocation</span>
+        w_random <span style="color: #666">=</span> np<span style="color: #666">.</span>random<span style="color: #666">.</span>rand(<span style="color: #008000">len</span>(t))
+        w_random <span style="color: #666">=</span> w_random <span style="color: #666">/</span> w_random<span style="color: #666">.</span>sum()
+        results[date][<span style="color: #BA2121">f&#39;returns_random_</span><span style="color: #A45A77; font-weight: bold">{</span>pred_name<span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&#39;</span>] <span style="color: #666">=</span> (w_random <span style="color: #666">*</span> future_pos)<span style="color: #666">.</span>sum()
+
+        <span style="color: #3D7B7B; font-style: italic"># Max Sharpe optimized</span>
+        w_sharpe <span style="color: #666">=</span> optimize_weights(pred_pos, cov_filtered, fun<span style="color: #666">=</span>neg_sharpe_ratio_objective)
+        results[date][<span style="color: #BA2121">f&#39;returns_sharpe_</span><span style="color: #A45A77; font-weight: bold">{</span>pred_name<span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&#39;</span>] <span style="color: #666">=</span> (w_sharpe <span style="color: #666">*</span> future_pos)<span style="color: #666">.</span>sum()
+
+        <span style="color: #3D7B7B; font-style: italic"># Min Variance optimized</span>
+        w_minvar <span style="color: #666">=</span> optimize_weights(pred_pos, cov_filtered, fun<span style="color: #666">=</span>calculate_portfolio_variance)
+        results[date][<span style="color: #BA2121">f&#39;returns_minvar_</span><span style="color: #A45A77; font-weight: bold">{</span>pred_name<span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&#39;</span>] <span style="color: #666">=</span> (w_minvar <span style="color: #666">*</span> future_pos)<span style="color: #666">.</span>sum()
+
+        <span style="color: #3D7B7B; font-style: italic"># Markowitz Mean-Variance optimized</span>
+        w_mv <span style="color: #666">=</span> optimize_weights(pred_pos, cov_filtered, fun<span style="color: #666">=</span>neg_markowitz_objective)
+        results[date][<span style="color: #BA2121">f&#39;returns_mv_</span><span style="color: #A45A77; font-weight: bold">{</span>pred_name<span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&#39;</span>] <span style="color: #666">=</span> (w_mv <span style="color: #666">*</span> future_pos)<span style="color: #666">.</span>sum()
+</code></pre></div>
+
+<p>Backtest runs over 11 quarterly periods (mid-2023 to end-2025).</p>
+<hr />
+<h2>Results Analysis</h2>
+<p>Let's plot the cumulative returns for all strategies :</p>
+<p><img alt="Cumulative Quarterly Log Returns — Momentum vs ML Predictions" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_cumulative_returns.png" /></p>
+<p>All strategies end up positive (except one) — the 2023–2026 test window coincided with a strong bull market. <code>mv_momentum</code> dominates on raw return, reaching ~1.47 cumulative log return. But the spread between strategies and allocation methods is what matters.</p>
+<p>Now the key comparisons — total returns and realised Sharpe ratios across all 12 strategies :</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Total Return</th>
+<th>Avg Q Return</th>
+<th>Std Q Return</th>
+<th>Realised Sharpe</th>
+<th>Max Q Drawdown</th>
+<th>Best Q Return</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mv_momentum</td>
+<td>1.4663</td>
+<td>0.1333</td>
+<td>0.1807</td>
+<td>0.7378</td>
+<td>−0.1659</td>
+<td>0.3669</td>
+</tr>
+<tr>
+<td>minvar_gbr</td>
+<td>0.2321</td>
+<td>0.0211</td>
+<td>0.0335</td>
+<td>0.6308</td>
+<td>−0.0099</td>
+<td>0.0786</td>
+</tr>
+<tr>
+<td>minvar_lr</td>
+<td>0.2272</td>
+<td>0.0207</td>
+<td>0.0375</td>
+<td>0.5512</td>
+<td>−0.0158</td>
+<td>0.0782</td>
+</tr>
+<tr>
+<td>sharpe_lr</td>
+<td>0.3370</td>
+<td>0.0306</td>
+<td>0.0563</td>
+<td>0.5438</td>
+<td>−0.0870</td>
+<td>0.1445</td>
+</tr>
+<tr>
+<td>random_gbr</td>
+<td>0.2483</td>
+<td>0.0226</td>
+<td>0.0485</td>
+<td>0.4658</td>
+<td>−0.0565</td>
+<td>0.1127</td>
+</tr>
+<tr>
+<td>random_momentum</td>
+<td>0.2486</td>
+<td>0.0226</td>
+<td>0.0493</td>
+<td>0.4587</td>
+<td>−0.0594</td>
+<td>0.1231</td>
+</tr>
+<tr>
+<td>random_lr</td>
+<td>0.2312</td>
+<td>0.0210</td>
+<td>0.0502</td>
+<td>0.4188</td>
+<td>−0.0609</td>
+<td>0.1094</td>
+</tr>
+<tr>
+<td>minvar_momentum</td>
+<td>0.2133</td>
+<td>0.0194</td>
+<td>0.0567</td>
+<td>0.3421</td>
+<td>−0.0488</td>
+<td>0.1217</td>
+</tr>
+<tr>
+<td>mv_gbr</td>
+<td>0.8678</td>
+<td>0.0789</td>
+<td>0.2378</td>
+<td>0.3317</td>
+<td>−0.2426</td>
+<td>0.5924</td>
+</tr>
+<tr>
+<td>sharpe_gbr</td>
+<td>0.5645</td>
+<td>0.0513</td>
+<td>0.1851</td>
+<td>0.2772</td>
+<td>−0.2935</td>
+<td>0.4004</td>
+</tr>
+<tr>
+<td>sharpe_momentum</td>
+<td>0.2005</td>
+<td>0.0182</td>
+<td>0.0793</td>
+<td>0.2300</td>
+<td>−0.1058</td>
+<td>0.1255</td>
+</tr>
+<tr>
+<td>mv_lr</td>
+<td>−0.1050</td>
+<td>−0.0095</td>
+<td>0.1291</td>
+<td>−0.0739</td>
+<td>−0.1812</td>
+<td>0.2298</td>
+</tr>
+</tbody>
+</table>
+<p><img alt="Total Return and Realised Sharpe — All Strategies" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_total_return_sharpe_comparison.png" /></p>
+<p>Focused comparison — grouping by allocation method across prediction strategies :</p>
+<p><img alt="Sharpe Allocation: Momentum vs LR vs GBR" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_sharpe_portfolios_comparison.png" /></p>
+<p>The Sharpe-GBR line (green dot-dash) climbs steeply through Q4 2023, then stays around 0.45–0.57. LR (blue dashed) builds steadily and finishes at 0.34. The Sharpe-momentum line (red) stays relatively flat around 0.20.</p>
+<p><img alt="Min Variance Allocation: Momentum vs LR vs GBR" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_minvar_portfolios_comparison.png" /></p>
+<p>Min variance strategies show much tighter clustering — all three prediction methods converge around 0.21–0.23 total return, but with very different stability profiles. <code>minvar_lr</code> leads mid-test before all three converge.</p>
+<p><img alt="Markowitz Allocation: Momentum vs LR vs GBR" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article3_mv_portfolios_comparison.png" /></p>
+<p>The Markowitz chart shows the widest spread — <code>mv_momentum</code> dominates at 1.47, <code>mv_gbr</code> at 0.87, while <code>mv_lr</code> goes negative. This illustrates how agressive concentration amplifies prediction errors.</p>
+<hr />
+<h2>Discussion</h2>
+<p><code>mv_momentum</code> leads on raw return (1.47 log return, 0.74 Sharpe) — momentum + aggressive concentration works in trending markets. But it comes with 0.18 quarterly std.</p>
+<p>Min Variance + ML is the risk-adjusted standout. <code>minvar_gbr</code> (0.63 Sharpe, 0.034 std) and <code>minvar_lr</code> (0.55 Sharpe) use predictions only as a stock filter, ignoring return magnitudes for allocation. This sidesteps noisy return estimates entirely.</p>
+<p>Markowitz amplifies everything — <code>mv_gbr</code> reaches 0.87 return but <code>mv_lr</code> goes <em>negative</em> (−0.10), showing how concentration destroys value when predictions are wrong. Random allocation (~0.25 return, ~0.45 Sharpe across all predictions) proves that the stock selection step already captures most of the value.</p>
+<p>Bottom line: ML predictions improve stock filtering. <code>minvar_gbr</code> (0.63) &gt; <code>minvar_lr</code> (0.55) &gt; <code>minvar_momentum</code> (0.34) on Sharpe. The signal is real, it's the allocation method that determines whether you exploit it or blow up.</p>
+<hr />
+<h2>Conclusion</h2>
+<p>The 3 × 4 strategy grid shows that prediction quality and allocation method interact in non-obvious ways. Min-variance doesn't use predicted magnitudes at all — yet <code>minvar_gbr</code> is the second-best risk-adjusted strategy, proving GBR selects the right stocks even if the exact return forecasts are noisy.</p>
+<p><strong>Key takeaways :</strong> Small R² ≠ useless (cross-sectional ranking drives alpha). Min Variance + ML stock selection is surprisingly robust. Markowitz amplifies both signal and errors. Always benchmark against random allocation.</p>
+<h2>Current Limitations</h2>
+<ul>
+<li><strong>Survivorship bias</strong> — only current S&amp;P 500 constituents</li>
+<li><strong>Static covariance</strong> — estimated once on validation data</li>
+<li><strong>No transaction costs</strong> — high turnover strategies look better on paper</li>
+<li><strong>Price-only features</strong> — no fundamentals or alternative data</li>
+<li><strong>Short test period</strong> — 11 quarters is not statistically robust</li>
+</ul>
+<h2>Next Steps</h2>
+<ul>
+<li>Include historical S&amp;P 500 constituents (survivorship bias)</li>
+<li>Rolling / exponentially-weighted covariance estimation</li>
+<li>Fundamental features (P/E, earnings growth, dividend yield)</li>
+<li>Transaction cost penalty in the objective function</li>
+<li>Ensemble stacking (LR + GBR meta-learner)</li>
+<li>Black-Litterman framework — blend ML predictions with market-implied equilibrium returns for more stable weights</li>
+</ul>
+<hr />
+<p><strong>Full Notebook / Code available :</strong></p>
+<p><a href="https://github.com/alexandreib/medium/blob/main/notebooks/3_SP500_Portfolio_Allocation_ML_predictions.ipynb">https://github.com/alexandreib/medium/blob/main/notebooks/3_SP500_Portfolio_Allocation_ML_predictions.ipynb</a></p>
+</body>
+</html>
