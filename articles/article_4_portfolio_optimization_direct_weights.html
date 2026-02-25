@@ -71,7 +71,7 @@
 </tbody>
 </table>
 <p>If you haven't read <a href="https://medium.com/@alexandre.durand/portfolio-optimization-on-s-p-500-stocks-predicting-returns-with-ml-609ad179c03f">article 3</a>, check it for the feature definitions and train/valid/test split logic. Same temporal split: 70/15/15.</p>
-<pre>df = pd.read_csv('../data/sp500_20years.csv')
+<pre><code class="language-python">df = pd.read_csv('../data/sp500_20years.csv')
 
 df['Log_Return'] = df.groupby('Ticker')['Adj Close'].transform(lambda x: np.log(x / x.shift(1)))
 
@@ -83,23 +83,23 @@ df['Quarterly_Log_Return'] = df.groupby('Ticker')['Log_Return']\
 feature_cols = ['ret_q1','ret_q2','ret_q4','volatility_63d',
                 'volatility_252d','mom_12_1','volatility_ratio','mean_reversion']
 df['target'] = df.groupby('Ticker')['Quarterly_Log_Return'].shift(-days)
-</pre>
+</code></pre>
 <p>Output:</p>
-<pre>Total rows: 2,518,880
+<pre><code>Total rows: 2,518,880
 train :  1411253 rows | 2006-02-24 -&gt; 2020-02-14
 valid :   379262 rows | 2020-02-18 -&gt; 2023-02-13
 test  :   379765 rows | 2023-02-14 -&gt; 2026-02-18
 test rebalancing dates : 12
-</pre>
+</code></pre>
 <p>We also prepare quarterly-sampled versions of train and valid (one observation per 63 trading days). This gives non-overlapping returns for the weight model:</p>
-<pre>Quarterly train : 22295 rows | 56 dates
+<pre><code>Quarterly train : 22295 rows | 56 dates
 Quarterly valid :  5848 rows | 14 dates
-</pre>
+</code></pre>
 <p>So ~22K rows for the weight model vs ~1.4M for the return model. Big tradeoff.</p>
 <hr />
 <h2>LightGBM Baseline — MSE Loss</h2>
 <p>First, a standard LightGBM regressor trained on the full daily dataset. This replaces <code>GradientBoostingRegressor</code> from article 3.</p>
-<pre>params_mse = {
+<pre><code class="language-python">params_mse = {
     'objective': 'regression',
     'metric': 'rmse',
     'learning_rate': 0.05,
@@ -118,7 +118,7 @@ lgbm_mse = lgb.train(
     valid_sets=[dvalid_mse],
     callbacks=[lgb.early_stopping(50), lgb.log_evaluation(50)]
 )
-</pre>
+</code></pre>
 <p>Best iteration stops around 200 rounds. The RMSE on validation is comparable to what we got with sklearn's GBR. Feature importance shows <code>volatility_ratio</code> and <code>volatility_252d</code> dominating, similar pattern to article 3.</p>
 <hr />
 <h2>Direct Weight Prediction — The Idea</h2>
@@ -126,13 +126,14 @@ lgbm_mse = lgb.train(
 <p>The idea here: <strong>skip the two-stage pipeline entirely</strong>. If we can learn what good allocations look like from historical data, we don't need the optimizer at test time.</p>
 <h3>Oracle Weight Targets</h3>
 <p>For each rebalancing date <em>t</em> in the training set, we have access to the realised future returns rᵢ⁽ᵗ⁾ (hindsight — these are the actual returns that happened). We run Markowitz optimization on these realised returns to get the oracle-optimal weights:</p>
-<pre>w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]
-
-subject to  Σ wᵢ = 1  and  0 ≤ wᵢ ≤ 0.3
-</pre>
+<blockquote>
+<p><strong>w*(t) = argmin_w [ γ · wᵀΣw − wᵀr(t) ]</strong></p>
+</blockquote>
+<p>subject to Σwᵢ = 1 and 0 ≤ wᵢ ≤ 0.3</p>
 <p>These w*ᵢ⁽ᵗ⁾ become training targets. The model learns:</p>
-<pre>f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾
-</pre>
+<blockquote>
+<p><strong>f(featuresᵢ⁽ᵗ⁾) ≈ wᵢ*⁽ᵗ⁾</strong></p>
+</blockquote>
 <h3>Why This Can Work</h3>
 <p>The key assumption: <strong>stocks that deserved high weight in the past share recognisable feature patterns</strong>. If volatility, momentum, and past returns carry predictive signal for which stocks will end up in the optimal portfolio, the model can learn that mapping without ever predicting returns explicitly.</p>
 <p>Think of it this way — the oracle weights encode everything the optimizer would have done with perfect information. Instead of learning returns and then optimizing, we learn the end result directly.</p>
@@ -146,7 +147,7 @@ subject to  Σ wᵢ = 1  and  0 ≤ wᵢ ≤ 0.3
 <hr />
 <h2>Computing Oracle Weights</h2>
 <p>This part is computationally heavier than training the model. For each of the 56 quarterly training dates, we run Markowitz optimization on ~400 stocks using realized returns:</p>
-<pre>def compute_oracle_weights(df_q, cov_matrix, alloc_fun=neg_markowitz_objective):
+<pre><code class="language-python">def compute_oracle_weights(df_q, cov_matrix, alloc_fun=neg_markowitz_objective):
     weights = pd.Series(0.0, index=df_q.index)
 
     for date, group in df_q.groupby('Date'):
@@ -171,16 +172,16 @@ subject to  Σ wᵢ = 1  and  0 ≤ wᵢ ≤ 0.3
         weights.loc[group.index[valid][pos]] = w
 
     return weights.values
-</pre>
+</code></pre>
 <p>Important nuance: most stocks get <strong>zero weight</strong> in the oracle allocation. The Markowitz optimizer concentrates on a handful of stocks. So the target distribution is heavily skewed — lots of zeros, a few positive values around 0.01–0.30. This makes regression harder than predicting returns, where the target distribution is roughly symmetric.</p>
-<pre>Non-zero training weights: 3251 / 22295 (14.6%)
+<pre><code>Non-zero training weights: 3251 / 22295 (14.6%)
 Non-zero validation weights: 842 / 5848 (14.4%)
 Mean non-zero weight (train): 0.0408
-</pre>
+</code></pre>
 <p>Only ~15% of training samples have non-zero target weight. The model needs to learn both <strong>which stocks to include</strong> and <strong>how much to allocate</strong>.</p>
 <hr />
 <h2>Training the Weight Model</h2>
-<pre>params_weight = {
+<pre><code class="language-python">params_weight = {
     'objective': 'regression',
     'metric': 'rmse',
     'learning_rate': 0.01,
@@ -199,7 +200,7 @@ lgbm_weights = lgb.train(
     valid_sets=[dvalid_w],
     callbacks=[lgb.early_stopping(100), lgb.log_evaluation(100)]
 )
-</pre>
+</code></pre>
 <p>We use a lower learning rate and shallower trees compared to the MSE model — the weight targets are noisier (oracle weights are sensitive to small changes in realized returns).</p>
 <h3>Feature Importance Comparison</h3>
 <p><img alt="Feature Importance — LGBM-MSE vs LGBM-Weights" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article4_feature_importance_comparison.png" /></p>
@@ -218,13 +219,13 @@ lgbm_weights = lgb.train(
 <li><strong>LGBM-Weights</strong>: predict weights directly → clip negatives → normalize → done</li>
 </ol>
 <p>This gives us 2×4 + 1 = 9 strategies. The weight model's whole point is that it skips optimization.</p>
-<pre># LGBM-Weights: direct allocation (no optimizer)
+<pre><code class="language-python"># LGBM-Weights: direct allocation (no optimizer)
 w_pred = p_weights.loc[common_w].values
 w_pred = np.maximum(w_pred, 0)
 if w_pred.sum() &gt; 1e-8:
     w_pred = w_pred / w_pred.sum()
     results[date]['returns_direct_lgbm_weights'] = (w_pred * future_w).sum()
-</pre>
+</code></pre>
 <hr />
 <h2>Results</h2>
 <p><img alt="Cumulative Quarterly Log Returns — All Strategies" src="https://raw.githubusercontent.com/alexandreib/medium/main/articles/images/article4_cumulative_returns.png" /></p>

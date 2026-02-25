@@ -18,6 +18,7 @@ from pathlib import Path
 import markdown
 from markdown.extensions.tables import TableExtension
 from markdown.extensions.fenced_code import FencedCodeExtension
+from markdown.extensions.codehilite import CodeHiliteExtension
 
 
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/{repo}/{branch}/articles"
@@ -73,19 +74,6 @@ def extract_title(md_text: str) -> str:
     return m.group(1).strip() if m else "Article"
 
 
-def strip_code_inside_pre(html: str) -> str:
-    """Medium's importer drops <code> inside <pre>.
-    Replace <pre><code class="...">...</code></pre> with plain <pre>...</pre>.
-    """
-    html = re.sub(
-        r'<pre><code[^>]*>(.*?)</code></pre>',
-        r'<pre>\1</pre>',
-        html,
-        flags=re.DOTALL,
-    )
-    return html
-
-
 def convert(input_path: str, output_path: str, repo: str, branch: str) -> None:
     raw_base = GITHUB_RAW_BASE.format(repo=repo, branch=branch)
 
@@ -102,9 +90,6 @@ def convert(input_path: str, output_path: str, repo: str, branch: str) -> None:
         FencedCodeExtension(),
     ]
     html_body = markdown.markdown(md_text, extensions=extensions)
-
-    # Post-process: strip <code> wrappers inside <pre> blocks
-    html_body = strip_code_inside_pre(html_body)
 
     html_full = TEMPLATE.format(title=title, body=html_body)
 
